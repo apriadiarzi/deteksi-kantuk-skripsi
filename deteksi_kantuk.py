@@ -95,15 +95,7 @@ def plot_eye_landmarks(frame, left_lm_coordinates, right_lm_coordinates, color):
 
 
 def plot_text(image, text, origin, color, font=cv2.FONT_HERSHEY_SIMPLEX, fntScale=0.8, thickness=2):
-    # Ensure image is converted to cv::UMat to avoid argument type issues
-    image_um = cv2.UMat(image)
-
-    # Draw text on the image
-    cv2.putText(image_um, text, origin, font, fntScale, color, thickness)
-
-    # Convert back to numpy array if necessary
-    image = image_um.get()  # Convert cv::UMat back to numpy array
-
+    image = cv2.putText(image, text, origin, font, fntScale, color, thickness)
     return image
 
 class VideoFrameHandler:
