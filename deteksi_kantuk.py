@@ -76,20 +76,20 @@ def calculate_avg_ear(landmarks, left_eye_idxs, right_eye_idxs, image_w, image_h
 
 
 def plot_eye_landmarks(frame, left_lm_coordinates, right_lm_coordinates, color):
+    # Convert frame to cv::UMat
+    frame_um = cv2.UMat(frame)
+
     # Draw circles on frame for left and right landmarks
     for lm_coordinates in [left_lm_coordinates, right_lm_coordinates]:
         if lm_coordinates:
             for coord in lm_coordinates:
-                cv2.circle(frame, coord, 2, color, -1)
+                cv2.circle(frame_um, coord, 2, color, -1)
+
+    # Convert cv::UMat back to numpy array
+    frame = frame_um.get()
 
     # Flip the frame horizontally
     frame = cv2.flip(frame, 1)
-
-    # Convert frame to cv::UMat (optional, for GPU-accelerated operations)
-    frame_um = cv2.UMat(frame)
-
-    # Convert cv::UMat back to numpy array (optional, if needed)
-    frame = frame_um.get()
 
     return frame
 
