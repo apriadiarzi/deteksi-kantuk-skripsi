@@ -76,19 +76,35 @@ def calculate_avg_ear(landmarks, left_eye_idxs, right_eye_idxs, image_w, image_h
 
 
 def plot_eye_landmarks(frame, left_lm_coordinates, right_lm_coordinates, color):
+    # Draw circles on frame for left and right landmarks
     for lm_coordinates in [left_lm_coordinates, right_lm_coordinates]:
         if lm_coordinates:
             for coord in lm_coordinates:
                 cv2.circle(frame, coord, 2, color, -1)
 
+    # Flip the frame horizontally
     frame = cv2.flip(frame, 1)
+
+    # Convert frame to cv::UMat (optional, for GPU-accelerated operations)
+    frame_um = cv2.UMat(frame)
+
+    # Convert cv::UMat back to numpy array (optional, if needed)
+    frame = frame_um.get()
+
     return frame
 
 
 def plot_text(image, text, origin, color, font=cv2.FONT_HERSHEY_SIMPLEX, fntScale=0.8, thickness=2):
-    image = cv2.putText(image, text, origin, font, fntScale, color, thickness)
-    return image
+    # Ensure image is converted to cv::UMat to avoid argument type issues
+    image_um = cv2.UMat(image)
 
+    # Draw text on the image
+    cv2.putText(image_um, text, origin, font, fntScale, color, thickness)
+
+    # Convert back to numpy array if necessary
+    image = image_um.get()  # Convert cv::UMat back to numpy array
+
+    return image
 
 class VideoFrameHandler:
     def __init__(self):
