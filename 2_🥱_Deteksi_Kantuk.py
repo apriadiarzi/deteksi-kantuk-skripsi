@@ -17,18 +17,18 @@ alarm_file_path = os.path.join("audio", "wake_up.wav")
 # Streamlit Components
 st.set_page_config(
     page_title="Sistem pendeteksi kantuk",
-    page_icon="https://learnopencv.com/wp-content/uploads/2017/12/favicon.png",
+    page_icon="https://cdn-icons-png.flaticon.com/512/1464/1464723.png",
     layout="wide",  # centered, wide
     initial_sidebar_state="expanded",
-    menu_items={
-        "About": "### Visit www.learnopencv.com for more exciting tutorials!!!",
-    },
+    # menu_items={
+    #     "About": "### Visit www.learnopencv.com for more exciting tutorials!!!",
+    # },
 )
 
 col1, col2 = st.columns(spec=[6, 2], gap="medium")
 
 with col1:
-    st.title("Sistem Pendeteksi Kantuk Pada Pengendara Roda Empat")
+    st.title("Sistem Pendeteksi Kantuk Untuk Pengendara Roda Empat")
     with st.container():
         c1, c2 = st.columns(spec=[1, 1])
         with c1:
@@ -75,7 +75,7 @@ with col1:
         key="drowsiness-detection",
         video_frame_callback=video_frame_callback,
         audio_frame_callback=audio_frame_callback,
-        rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]},  # Add this to config for cloud deployment.
+        rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]},
         media_stream_constraints={"video": {"height": {"ideal": 480}}, "audio": True},
         video_html_attrs=VideoHTMLAttributes(autoPlay=True, controls=False, muted=False),
     )

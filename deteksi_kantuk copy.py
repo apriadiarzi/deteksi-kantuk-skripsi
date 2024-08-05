@@ -11,7 +11,7 @@ def get_mediapipe_app(
     min_detection_confidence=0.5,
     min_tracking_confidence=0.5,
 ):
-    """Menginisialisasi dan mengembalikan objek grafik FaceMesh dari Mediapipe """
+    """Initialize and return Mediapipe FaceMesh Solution Graph object"""
     face_mesh = mp.solutions.face_mesh.FaceMesh(
         max_num_faces=max_num_faces,
         refine_landmarks=refine_landmarks,
@@ -23,40 +23,39 @@ def get_mediapipe_app(
 
 
 def distance(point_1, point_2):
-    """Menghitung jarak lurus (euclidean) antar 2 titik"""
+    """Calculate l2-norm between two points"""
     dist = sum([(i - j) ** 2 for i, j in zip(point_1, point_2)]) ** 0.5
     return dist
 
 
 def get_ear(landmarks, refer_idxs, frame_width, frame_height):
     """
-    Menghitung Eye Aspect Ratio untuk 1 mata
+    Calculate Eye Aspect Ratio for one eye.
 
     Args:
-        landmarks: Deteksi list landmarks (satuan list)
-        refer_idxs: Posisi index dari landmark yang sudah ditentukan (satuan list)
-                            dengan urutan P1, P2, P3, P4, P5, P6
-        frame_width: (int) Lebar dari frame yang diambil
-        frame_height: (int) Tinggi dari frame yang diambil
+        landmarks: (list) Detected landmarks list
+        refer_idxs: (list) Index positions of the chosen landmarks
+                            in order P1, P2, P3, P4, P5, P6
+        frame_width: (int) Width of captured frame
+        frame_height: (int) Height of captured frame
+
     Returns:
-        ear: Eye aspect ratio (satuan float)
+        ear: (float) Eye aspect ratio
     """
     try:
-        # Menghitung jarak euclidean antara 2 titik pada garis horizontal
-
-        # untuk mengambil koordinat dari titik-titik referensi pada frame, lalu dekode menjadi koordinat pixel
+        # Compute the euclidean distance between the horizontal
         coords_points = []
         for i in refer_idxs:
             lm = landmarks[i]
             coord = denormalize_coordinates(lm.x, lm.y, frame_width, frame_height)
             coords_points.append(coord)
 
-        # Koordinat Landmark mata (x,y)  
+        # Eye landmark (x, y)-coordinates
         P2_P6 = distance(coords_points[1], coords_points[5])
         P3_P5 = distance(coords_points[2], coords_points[4])
         P1_P4 = distance(coords_points[0], coords_points[3])
 
-        # Menghitung Eye Aspect Ratio
+        # Compute the eye aspect ratio
         ear = (P2_P6 + P3_P5) / (2.0 * P1_P4)
 
     except:
@@ -67,7 +66,7 @@ def get_ear(landmarks, refer_idxs, frame_width, frame_height):
 
 
 def calculate_avg_ear(landmarks, left_eye_idxs, right_eye_idxs, image_w, image_h):
-    # Menghitung Rata-rata eye aspect ratio
+    # Calculate Eye aspect ratio
 
     left_ear, left_lm_coordinates = get_ear(landmarks, left_eye_idxs, image_w, image_h)
     right_ear, right_lm_coordinates = get_ear(landmarks, right_eye_idxs, image_w, image_h)
@@ -77,21 +76,12 @@ def calculate_avg_ear(landmarks, left_eye_idxs, right_eye_idxs, image_w, image_h
 
 
 def plot_eye_landmarks(frame, left_lm_coordinates, right_lm_coordinates, color):
-    # Convert frame to cv::UMat
-    frame_um = cv2.UMat(frame)
-
-    # Draw circles on frame for left and right landmarks
     for lm_coordinates in [left_lm_coordinates, right_lm_coordinates]:
         if lm_coordinates:
             for coord in lm_coordinates:
-                cv2.circle(frame_um, coord, 2, color, -1)
+                cv2.circle(frame, coord, 2, color, -1)
 
-    # Convert cv::UMat back to numpy array
-    frame = frame_um.get()
-
-    # Flip the frame horizontally
     frame = cv2.flip(frame, 1)
-
     return frame
 
 
@@ -99,13 +89,14 @@ def plot_text(image, text, origin, color, font=cv2.FONT_HERSHEY_SIMPLEX, fntScal
     image = cv2.putText(image, text, origin, font, fntScale, color, thickness)
     return image
 
+
 class VideoFrameHandler:
     def __init__(self):
         """
         Initialize the necessary constants, mediapipe app
         and tracker variables
         """
-        # Landmark mata kanan dan kiri yang sudah dipilih
+        # Left and right eye chosen landmarks.
         self.eye_idxs = {
             "left": [362, 385, 387, 263, 373, 380],
             "right": [33, 160, 158, 133, 153, 144],
