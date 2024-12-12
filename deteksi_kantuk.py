@@ -6,6 +6,7 @@ from mediapipe.python.solutions.drawing_utils import _normalized_to_pixel_coordi
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+from decouple import config
 import requests
 
 # Fungsi untuk mendapatkan lokasi menggunakan Google Geolocation API
@@ -192,7 +193,7 @@ class VideoFrameHandler:
 
 # Tes fungsi pengambilan lokasi
 if __name__ == "__main__":
-    API_KEY = "YOUR_GOOGLE_API_KEY"  # Ganti dengan API Key Anda
+    API_KEY = config('GOOGLE_API_KEY')
     handler = VideoFrameHandler(api_key=API_KEY)
     lokasi = get_current_location(API_KEY)
     print(f"Lokasi Google Maps: {lokasi}")
