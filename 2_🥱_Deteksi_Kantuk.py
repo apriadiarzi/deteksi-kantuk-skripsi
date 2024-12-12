@@ -8,7 +8,6 @@ from streamlit_webrtc import VideoHTMLAttributes, webrtc_streamer
 
 from audio_handling import AudioFrameHandler
 from deteksi_kantuk import VideoFrameHandler
-from decouple import config
 from ads import css_string
 
 
@@ -46,7 +45,6 @@ thresholds = {
 }
 
 # For streamlit-webrtc
-api_key = config('GOOGLE_API_KEY')
 video_handler = VideoFrameHandler()
 audio_handler = AudioFrameHandler(sound_file_path=alarm_file_path)
 
