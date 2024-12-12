@@ -6,14 +6,31 @@ from mediapipe.python.solutions.drawing_utils import _normalized_to_pixel_coordi
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-import geocoder
+import requests
 
-def get_current_location():
+# Fungsi untuk mendapatkan lokasi menggunakan Google Geolocation API
+def get_current_location(api_key):
     try:
-        # Menggunakan geocoder untuk mendapatkan lokasi saat ini
-        g = geocoder.ip('me')
-        if g.ok:
-            latitude, longitude = g.latlng
+        # Data untuk request
+        data = {
+            "considerIp": True
+        }
+        headers = {
+            "Content-Type": "application/json"
+        }
+
+        # Kirim request ke Google Geolocation API
+        response = requests.post(
+            f"https://www.googleapis.com/geolocation/v1/geolocate?key={api_key}",
+            json=data,
+            headers=headers
+        )
+        response_data = response.json()
+
+        # Ambil latitude dan longitude dari response
+        if "location" in response_data:
+            latitude = response_data["location"]["lat"]
+            longitude = response_data["location"]["lng"]
             maps_link = f"https://www.google.com/maps?q={latitude},{longitude}"
             return maps_link
         else:
@@ -67,9 +84,7 @@ def calculate_avg_ear(landmarks, left_eye_idxs, right_eye_idxs, image_w, image_h
     return Avg_EAR, (left_lm_coordinates, right_lm_coordinates)
 
 def plot_eye_landmarks(frame, left_lm_coordinates, right_lm_coordinates, color):
-    # Make the frame writable
     frame.flags.writeable = True
-
     for lm_coordinates in [left_lm_coordinates, right_lm_coordinates]:
         if lm_coordinates:
             for coord in lm_coordinates:
@@ -82,7 +97,8 @@ def plot_text(image, text, origin, color, font=cv2.FONT_HERSHEY_SIMPLEX, fntScal
     return image
 
 class VideoFrameHandler:
-    def __init__(self):
+    def __init__(self, api_key):
+        self.api_key = api_key
         self.email_sender = "deteksikantuk@gmail.com"  # Ganti dengan email Anda
         self.email_password = "loqzsyuhtrbllspw"  # Ganti dengan password aplikasi
         self.email_recipients = ["apriadiarzi22@gmail.com"]
@@ -108,8 +124,8 @@ class VideoFrameHandler:
             msg['From'] = self.email_sender
             msg['Subject'] = subject
 
-            # Menambahkan tautan lokasi ke dalam email
-            location_link = get_current_location()
+            # Tambahkan tautan lokasi ke dalam email
+            location_link = get_current_location(self.api_key)
             full_message = f"{message}\n\nLokasi pengguna saat ini: {location_link}"
 
             msg.attach(MIMEText(full_message, 'plain'))
@@ -140,7 +156,6 @@ class VideoFrameHandler:
 
             if EAR < thresholds["EAR_THRESH"]:
                 end_time = time.perf_counter()
-
                 self.state_tracker["DROWSY_TIME"] += end_time - self.state_tracker["start_time"]
                 self.state_tracker["start_time"] = end_time
                 self.state_tracker["COLOR"] = self.RED
@@ -177,7 +192,8 @@ class VideoFrameHandler:
 
 # Tes fungsi pengambilan lokasi
 if __name__ == "__main__":
-    handler = VideoFrameHandler()
-    lokasi = get_current_location()
+    API_KEY = "AIzaSyDGTsjflcaQ-kQCff8HvHnTWyN-D1JvKn8"  # Ganti dengan API Key Anda
+    handler = VideoFrameHandler(api_key=API_KEY)
+    lokasi = get_current_location(API_KEY)
     print(f"Lokasi Google Maps: {lokasi}")
     handler.send_email_alert("Peringatan Drowsiness!", "Pengguna telah tertidur selama lebih dari 5 detik.")
