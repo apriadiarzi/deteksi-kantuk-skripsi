@@ -3,7 +3,24 @@ import time
 import numpy as np
 import mediapipe as mp
 from mediapipe.python.solutions.drawing_utils import _normalized_to_pixel_coordinates as denormalize_coordinates
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+import geocoder
 
+def get_current_location():
+    try:
+        # Menggunakan geocoder untuk mendapatkan lokasi saat ini
+        g = geocoder.ip('me')
+        if g.ok:
+            latitude, longitude = g.latlng
+            maps_link = f"https://www.google.com/maps?q={latitude},{longitude}"
+            return maps_link
+        else:
+            return "Lokasi tidak dapat diambil."
+    except Exception as e:
+        print(f"Error saat mengambil lokasi: {e}")
+        return "Lokasi tidak dapat diambil."
 
 def get_mediapipe_app(
     max_num_faces=1,
@@ -11,52 +28,30 @@ def get_mediapipe_app(
     min_detection_confidence=0.5,
     min_tracking_confidence=0.5,
 ):
-    """Menginisialisasi dan mengembalikan objek grafik FaceMesh dari Mediapipe """
     face_mesh = mp.solutions.face_mesh.FaceMesh(
         max_num_faces=max_num_faces,
         refine_landmarks=refine_landmarks,
         min_detection_confidence=min_detection_confidence,
         min_tracking_confidence=min_tracking_confidence,
     )
-
     return face_mesh
 
-
 def distance(point_1, point_2):
-    """Menghitung jarak lurus (euclidean) antar 2 titik"""
     dist = sum([(i - j) ** 2 for i, j in zip(point_1, point_2)]) ** 0.5
     return dist
 
-
 def get_ear(landmarks, refer_idxs, frame_width, frame_height):
-    """
-    Menghitung Eye Aspect Ratio untuk 1 mata
-
-    Args:
-        landmarks: Deteksi list landmarks (satuan list)
-        refer_idxs: Posisi index dari landmark yang sudah ditentukan (satuan list)
-                            dengan urutan P1, P2, P3, P4, P5, P6
-        frame_width: (int) Lebar dari frame yang diambil
-        frame_height: (int) Tinggi dari frame yang diambil
-    Returns:
-        ear: Eye aspect ratio (satuan float)
-    """
     try:
-        # Menghitung jarak euclidean antara 2 titik pada garis horizontal
-
-        # untuk mengambil koordinat dari titik-titik referensi pada frame, lalu dekode menjadi koordinat pixel
         coords_points = []
         for i in refer_idxs:
             lm = landmarks[i]
             coord = denormalize_coordinates(lm.x, lm.y, frame_width, frame_height)
             coords_points.append(coord)
 
-        # Koordinat Landmark mata (x,y)  
         P2_P6 = distance(coords_points[1], coords_points[5])
         P3_P5 = distance(coords_points[2], coords_points[4])
         P1_P4 = distance(coords_points[0], coords_points[3])
 
-        # Menghitung Eye Aspect Ratio
         ear = (P2_P6 + P3_P5) / (2.0 * P1_P4)
 
     except:
@@ -65,35 +60,19 @@ def get_ear(landmarks, refer_idxs, frame_width, frame_height):
 
     return ear, coords_points
 
-
 def calculate_avg_ear(landmarks, left_eye_idxs, right_eye_idxs, image_w, image_h):
-    # Menghitung Rata-rata eye aspect ratio
-
     left_ear, left_lm_coordinates = get_ear(landmarks, left_eye_idxs, image_w, image_h)
     right_ear, right_lm_coordinates = get_ear(landmarks, right_eye_idxs, image_w, image_h)
     Avg_EAR = (left_ear + right_ear) / 2.0
-
     return Avg_EAR, (left_lm_coordinates, right_lm_coordinates)
 
-
 def plot_eye_landmarks(frame, left_lm_coordinates, right_lm_coordinates, color):
-    # Convert frame to cv::UMat
-    frame_um = cv2.UMat(frame)
-
-    # Draw circles on frame for left and right landmarks
     for lm_coordinates in [left_lm_coordinates, right_lm_coordinates]:
         if lm_coordinates:
             for coord in lm_coordinates:
-                cv2.circle(frame_um, coord, 2, color, -1)
-
-    # Convert cv::UMat back to numpy array
-    frame = frame_um.get()
-
-    # Flip the frame horizontally
+                cv2.circle(frame, coord, 2, color, -1)
     frame = cv2.flip(frame, 1)
-
     return frame
-
 
 def plot_text(image, text, origin, color, font=cv2.FONT_HERSHEY_SIMPLEX, fntScale=0.8, thickness=2):
     image = cv2.putText(image, text, origin, font, fntScale, color, thickness)
@@ -101,50 +80,48 @@ def plot_text(image, text, origin, color, font=cv2.FONT_HERSHEY_SIMPLEX, fntScal
 
 class VideoFrameHandler:
     def __init__(self):
-        """
-        Initialize the necessary constants, mediapipe app
-        and tracker variables
-        """
-        # Landmark mata kanan dan kiri yang sudah dipilih
+        self.email_sender = "deteksikantuk@gmail.com"  # Ganti dengan email Anda
+        self.email_password = "loqzsyuhtrbllspw"  # Ganti dengan password aplikasi
+        self.email_recipients = ["apriadiarzi22@gmail.com"]
         self.eye_idxs = {
             "left": [362, 385, 387, 263, 373, 380],
             "right": [33, 160, 158, 133, 153, 144],
         }
-
-        # Used for coloring landmark points.
-        # Its value depends on the current EAR value.
-        self.RED = (0, 0, 255)  # BGR
-        self.GREEN = (0, 255, 0)  # BGR
-
-        # Initializing Mediapipe FaceMesh solution pipeline
+        self.RED = (0, 0, 255)
+        self.GREEN = (0, 255, 0)
         self.facemesh_model = get_mediapipe_app()
-
-        # For tracking counters and sharing states in and out of callbacks.
         self.state_tracker = {
             "start_time": time.perf_counter(),
-            "DROWSY_TIME": 0.0,  # Holds the amount of time passed with EAR < EAR_THRESH
+            "DROWSY_TIME": 0.0,
             "COLOR": self.GREEN,
             "play_alarm": False,
+            "message_sent": False,
         }
-
         self.EAR_txt_pos = (10, 30)
 
+    def send_email_alert(self, subject: str, message: str):
+        try:
+            msg = MIMEMultipart()
+            msg['From'] = self.email_sender
+            msg['Subject'] = subject
+
+            # Menambahkan tautan lokasi ke dalam email
+            location_link = get_current_location()
+            full_message = f"{message}\n\nLokasi pengguna saat ini: {location_link}"
+
+            msg.attach(MIMEText(full_message, 'plain'))
+
+            with smtplib.SMTP('smtp.gmail.com', 587) as server:
+                server.starttls()
+                server.login(self.email_sender, self.email_password)
+                for recipient in self.email_recipients:
+                    msg['To'] = recipient
+                    server.sendmail(self.email_sender, recipient, msg.as_string())
+                    print(f"Email terkirim ke {recipient}: {full_message}")
+        except Exception as e:
+            print(f"Gagal mengirim email: {e}")
+
     def process(self, frame: np.array, thresholds: dict):
-        """
-        This function is used to implement our Drowsy detection algorithm
-
-        Args:
-            frame: (np.array) Input frame matrix.
-            thresholds: (dict) Contains the two threshold values
-                               WAIT_TIME and EAR_THRESH.
-
-        Returns:
-            The processed frame and a boolean flag to
-            indicate if the alarm should be played or not.
-        """
-
-        # To improve performance,
-        # mark the frame as not writeable to pass by reference.
         frame.flags.writeable = False
         frame_h, frame_w, _ = frame.shape
 
@@ -159,9 +136,6 @@ class VideoFrameHandler:
             frame = plot_eye_landmarks(frame, coordinates[0], coordinates[1], self.state_tracker["COLOR"])
 
             if EAR < thresholds["EAR_THRESH"]:
-
-                # Increase DROWSY_TIME to track the time period with EAR less than the threshold
-                # and reset the start_time for the next iteration.
                 end_time = time.perf_counter()
 
                 self.state_tracker["DROWSY_TIME"] += end_time - self.state_tracker["start_time"]
@@ -172,11 +146,18 @@ class VideoFrameHandler:
                     self.state_tracker["play_alarm"] = True
                     plot_text(frame, "WAKE UP! WAKE UP", ALM_txt_pos, self.state_tracker["COLOR"])
 
+                    if not self.state_tracker["message_sent"] and self.state_tracker["DROWSY_TIME"] >= 5:
+                        self.send_email_alert(
+                            "Peringatan Drowsiness!",
+                            "Pengguna telah tertidur selama lebih dari 5 detik. Harap segera lakukan tindakan!"
+                        )
+                        self.state_tracker["message_sent"] = True
             else:
                 self.state_tracker["start_time"] = time.perf_counter()
                 self.state_tracker["DROWSY_TIME"] = 0.0
                 self.state_tracker["COLOR"] = self.GREEN
                 self.state_tracker["play_alarm"] = False
+                self.state_tracker["message_sent"] = False
 
             EAR_txt = f"EAR: {round(EAR, 2)}"
             DROWSY_TIME_txt = f"DROWSY: {round(self.state_tracker['DROWSY_TIME'], 3)} Secs"
@@ -189,7 +170,11 @@ class VideoFrameHandler:
             self.state_tracker["COLOR"] = self.GREEN
             self.state_tracker["play_alarm"] = False
 
-            # Flip the frame horizontally for a selfie-view display.
-            frame = cv2.flip(frame, 1)
-
         return frame, self.state_tracker["play_alarm"]
+
+# Tes fungsi pengambilan lokasi
+if __name__ == "__main__":
+    handler = VideoFrameHandler()
+    lokasi = get_current_location()
+    print(f"Lokasi Google Maps: {lokasi}")
+    handler.send_email_alert("Peringatan Drowsiness!", "Pengguna telah tertidur selama lebih dari 5 detik.")
