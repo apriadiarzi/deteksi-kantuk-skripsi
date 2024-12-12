@@ -192,7 +192,7 @@ class VideoFrameHandler:
 
 # Tes fungsi pengambilan lokasi
 if __name__ == "__main__":
-    API_KEY = "AIzaSyDGTsjflcaQ-kQCff8HvHnTWyN-D1JvKn8"  # Ganti dengan API Key Anda
+    API_KEY = "YOUR_GOOGLE_API_KEY"  # Ganti dengan API Key Anda
     handler = VideoFrameHandler(api_key=API_KEY)
     lokasi = get_current_location(API_KEY)
     print(f"Lokasi Google Maps: {lokasi}")
