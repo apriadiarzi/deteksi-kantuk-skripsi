@@ -194,7 +194,7 @@ class VideoFrameHandler:
 # Tes fungsi pengambilan lokasi
 if __name__ == "__main__":
     API_KEY = config('GOOGLE_API_KEY')
-    handler = VideoFrameHandler(api_key=API_KEY)
+    handler = VideoFrameHandler()
     lokasi = get_current_location(API_KEY)
     print(f"Lokasi Google Maps: {lokasi}")
     handler.send_email_alert("Peringatan Drowsiness!", "Pengguna telah tertidur selama lebih dari 5 detik.")
