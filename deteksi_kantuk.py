@@ -98,8 +98,8 @@ def plot_text(image, text, origin, color, font=cv2.FONT_HERSHEY_SIMPLEX, fntScal
     return image
 
 class VideoFrameHandler:
-    def __init__(self, api_key):
-        self.api_key = api_key
+    def __init__(self):
+        self.api_key = config('GOOGLE_API_KEY')
         self.email_sender = "deteksikantuk@gmail.com"  # Ganti dengan email Anda
         self.email_password = "loqzsyuhtrbllspw"  # Ganti dengan password aplikasi
         self.email_recipients = ["apriadiarzi22@gmail.com"]
