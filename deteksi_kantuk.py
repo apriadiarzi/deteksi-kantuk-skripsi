@@ -8,6 +8,7 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from decouple import config
 import requests
+from streamlit.runtime.secrets import secrets
 
 # Fungsi untuk mendapatkan lokasi menggunakan Google Geolocation API
 def get_current_location(api_key):
@@ -27,6 +28,10 @@ def get_current_location(api_key):
             headers=headers
         )
         response_data = response.json()
+
+        if response.status_code != 200:
+            print(f"Error: {response.status_code}, Message: {response_data}")
+            return "Lokasi tidak dapat diambil."
 
         # Ambil latitude dan longitude dari response
         if "location" in response_data:
@@ -99,7 +104,7 @@ def plot_text(image, text, origin, color, font=cv2.FONT_HERSHEY_SIMPLEX, fntScal
 
 class VideoFrameHandler:
     def __init__(self):
-        self.api_key = config('GOOGLE_API_KEY')
+        self.api_key = secrets["GOOGLE_API_KEY"]
         self.email_sender = "deteksikantuk@gmail.com"  # Ganti dengan email Anda
         self.email_password = "loqzsyuhtrbllspw"  # Ganti dengan password aplikasi
         self.email_recipients = ["apriadiarzi22@gmail.com"]
