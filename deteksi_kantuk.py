@@ -8,7 +8,6 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from decouple import config
 import requests
-from streamlit.runtime.secrets import secrets
 
 # Fungsi untuk mendapatkan lokasi menggunakan Google Geolocation API
 def get_current_location(api_key):
@@ -44,6 +43,14 @@ def get_current_location(api_key):
     except Exception as e:
         print(f"Error saat mengambil lokasi: {e}")
         return "Lokasi tidak dapat diambil."
+
+def get_user_ip():
+    try:
+        response = requests.get("https://api64.ipify.org?format=json")
+        return response.json().get("ip", "IP Tidak Diketahui")
+    except Exception as e:
+        print(f"Error mendapatkan IP: {e}")
+        return "Error IP"
 
 def get_mediapipe_app(
     max_num_faces=1,
@@ -104,7 +111,7 @@ def plot_text(image, text, origin, color, font=cv2.FONT_HERSHEY_SIMPLEX, fntScal
 
 class VideoFrameHandler:
     def __init__(self):
-        self.api_key = secrets["GOOGLE_API_KEY"]
+        self.api_key = config('GOOGLE_API_KEY')
         self.email_sender = "deteksikantuk@gmail.com"  # Ganti dengan email Anda
         self.email_password = "loqzsyuhtrbllspw"  # Ganti dengan password aplikasi
         self.email_recipients = ["apriadiarzi22@gmail.com"]
@@ -132,7 +139,8 @@ class VideoFrameHandler:
 
             # Tambahkan tautan lokasi ke dalam email
             location_link = get_current_location(self.api_key)
-            full_message = f"{message}\n\nLokasi pengguna saat ini: {location_link}"
+            user_ip = get_user_ip()
+            full_message = f"{message}\n\nLokasi pengguna saat ini: {location_link}\nIP pengguna: {user_ip}"
 
             msg.attach(MIMEText(full_message, 'plain'))
 
