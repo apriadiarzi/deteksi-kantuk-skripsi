@@ -107,11 +107,7 @@ h1, h2, h3 { font-family: 'Space Grotesk', sans-serif; }
     text-transform: uppercase; color: var(--muted); margin-top: 0.3rem;
 }
 
-/* Radio "Pilih sesi berkendara" & slider tanggal — keduanya widget klik/geser
-   murni (tidak ada elemen input teks sama sekali), jadi tidak butuh patch
-   cursor/anti-ketik seperti selectbox/date_input. */
-[data-testid="stRadio"] label { cursor: pointer; }
-[data-testid="stRadio"] input[type="radio"] { accent-color: var(--primary); cursor: pointer; }
+[data-testid="stSelectbox"] div[data-baseweb="select"] { cursor: pointer; }
 
 /* Baris kejadian — list rata, bukan tumpukan kartu warna-warni */
 .event-row {
@@ -229,7 +225,7 @@ if not sessions:
     st.info("Belum ada histori berkendara. Mulai sesi dari halaman Deteksi Kantuk.")
     st.stop()
 
-# ── Pilih sesi — slider tanggal + radio, keduanya klik/geser murni ──────────
+# ── Pilih sesi ────────────────────────────────────────────────────────────
 def session_label(row):
     sid, start, end, dur, eye, yawn, tilt = row
     total = (eye or 0) + (yawn or 0) + (tilt or 0)
@@ -275,7 +271,7 @@ if not filtered_sessions:
 
 st.caption(f"Menampilkan **{len(filtered_sessions)}** dari **{len(sessions)}** sesi")
 
-selected_id = st.radio(
+selected_id = st.selectbox(
     "Pilih sesi berkendara:",
     options=[r[0] for r in filtered_sessions],
     format_func=lambda x: session_label(next(r for r in filtered_sessions if r[0] == x))
