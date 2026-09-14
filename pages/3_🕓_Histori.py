@@ -108,6 +108,7 @@ h1, h2, h3 { font-family: 'Space Grotesk', sans-serif; }
 }
 
 [data-testid="stSelectbox"] div[data-baseweb="select"] { cursor: pointer; }
+[data-testid="stDateInput"] div[data-baseweb="base-input"] { cursor: pointer; }
 
 /* Baris kejadian — list rata, bukan tumpukan kartu warna-warni */
 .event-row {
@@ -242,18 +243,14 @@ for row in sessions:
     except:
         pass
 
-unique_dates = sorted(set(all_dates)) if all_dates else [date.today()]
+min_date = min(all_dates) if all_dates else date.today()
+max_date = max(all_dates) if all_dates else date.today()
 
-if len(unique_dates) == 1:
-    date_from = date_to = unique_dates[0]
-    st.caption(f"📅 Tanggal: **{unique_dates[0].strftime('%d-%m-%Y')}**")
-else:
-    date_from, date_to = st.select_slider(
-        "📅 Rentang tanggal:",
-        options=unique_dates,
-        value=(unique_dates[0], unique_dates[-1]),
-        format_func=lambda d: d.strftime("%d-%m-%Y"),
-    )
+f1, f2 = st.columns(2)
+with f1:
+    date_from = st.date_input("📅 Dari tanggal:", value=min_date, min_value=min_date, max_value=max_date)
+with f2:
+    date_to   = st.date_input("📅 Sampai tanggal:", value=max_date, min_value=min_date, max_value=max_date)
 
 # Filter sesi berdasarkan range
 filtered_sessions = []
