@@ -1,22 +1,39 @@
 import os
 import av
+import random
+import string
 import threading
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+
 import streamlit as st
 import streamlit_nested_layout
 from streamlit_webrtc import VideoHTMLAttributes, webrtc_streamer
 import streamlit.components.v1 as components
+from streamlit_autorefresh import st_autorefresh
 
 from audio_handling import AudioFrameHandler
 from deteksi_kantuk import VideoFrameHandler, set_location_cache
-
-import sqlite3
-from database import create_db, add_user, check_username_exists, check_login
+from database import (
+    create_db, add_user, check_username_exists, check_login,
+    start_session, end_session, save_otp, verify_otp, get_user_email,
+    resolve_guest_user, compute_session_totals, GUEST_COOKIE_VALUE, GUEST_STORAGE_KEY,
+)
 from hashlib import sha256
+from decouple import config
 import pickle
 import time
+import json
+from datetime import datetime
 
 create_db()
 
+# ── Konstanta email pengirim ──────────────────────────────────────────────────
+EMAIL_SENDER   = "deteksikantuk@gmail.com"
+EMAIL_PASSWORD = config('EMAIL_PASSWORD')
+
+# ── Cookie helper ─────────────────────────────────────────────────────────────
 def set_cookie(username):
     cookies = {"username": username, "expiry": time.time() + 60 * 60 * 24 * 30}
     pickle.dump(cookies, open("cookies.pkl", "wb"))
@@ -28,23 +45,317 @@ def get_cookie():
             return cookies["username"]
     return None
 
-user = get_cookie()
+def save_guest_session(session_id, start_time_str, events):
+    """Simpan satu sesi tamu ke localStorage browser (maksimal 10 sesi terbaru)."""
+    end_time_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    try:
+        start_dt = datetime.strptime(start_time_str, '%Y-%m-%d %H:%M:%S')
+        end_dt   = datetime.strptime(end_time_str, '%Y-%m-%d %H:%M:%S')
+        duration = int((end_dt - start_dt).total_seconds())
+    except Exception:
+        duration = None
+
+    total_eye_close, total_yawn, total_head_tilt = compute_session_totals(events)
+
+    session_data = {
+        "id": session_id,
+        "start_time": start_time_str,
+        "end_time": end_time_str,
+        "duration": duration,
+        "total_eye_close": total_eye_close,
+        "total_yawn": total_yawn,
+        "total_head_tilt": total_head_tilt,
+        "events": events,
+    }
+    payload = json.dumps(session_data).replace("</", "<\\/")
+    components.html(f"""
+    <script>
+    try {{
+        let arr = JSON.parse(localStorage.getItem('{GUEST_STORAGE_KEY}') || '[]');
+        arr.unshift({payload});
+        if (arr.length > 10) arr = arr.slice(0, 10);
+        localStorage.setItem('{GUEST_STORAGE_KEY}', JSON.stringify(arr));
+    }} catch (e) {{ console.error('Gagal simpan histori tamu:', e); }}
+    </script>
+    """, height=0)
+
+# ── Kirim OTP ─────────────────────────────────────────────────────────────────
+def generate_otp(length=6):
+    return ''.join(random.choices(string.digits, k=length))
+
+def send_otp_email(to_email: str, otp_code: str, username: str):
+    try:
+        msg = MIMEMultipart()
+        msg['From']    = EMAIL_SENDER
+        msg['To']      = to_email
+        msg['Subject'] = "🔐 Kode Verifikasi Sistem Pendeteksi Kantuk"
+        body = (
+            f"Seseorang dengan username '{username}' mendaftarkan email ini sebagai "
+            f"kontak darurat pada Sistem Pendeteksi Kantuk.\n\n"
+            f"Kode verifikasi kamu:\n\n"
+            f"{otp_code}\n\n"
+            f"Kode ini berlaku selama 10 menit.\n"
+            f"Jika kamu tidak merasa mendaftar, abaikan email ini.\n\n"
+            f"— Sistem Pendeteksi Kantuk"
+        )
+        msg.attach(MIMEText(body, 'plain'))
+        with smtplib.SMTP('smtp.gmail.com', 587) as server:
+            server.starttls()
+            server.login(EMAIL_SENDER, EMAIL_PASSWORD)
+            server.sendmail(EMAIL_SENDER, to_email, msg.as_string())
+        return True
+    except Exception as e:
+        print(f"Gagal kirim OTP: {e}")
+        return False
+
+# ── CSS ────────────────────────────────────────────────────────────────────────
+# Satu arah desain: panel instrumen malam hari — netral gelap + satu warna
+# aksen (amber, kayak lampu peringatan di dashboard mobil), bukan warna-warni.
+BG_COLOR = "#0B1F33"
+
+MOBILE_CSS = """
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&display=swap');
+
+:root {
+    --bg:         __BG_COLOR__;
+    --surface:    #102A43;
+    --border:     rgba(255,255,255,0.10);
+    --fg:         #f5f4f0;
+    --muted:      #8b8b92;
+    --accent:     #ff8a1e;
+    --accent-fg:  #16110a;
+    --radius-sm:  6px;
+    --radius-md:  10px;
+}
+
+html, body, [class*="css"] { font-family: 'Inter', sans-serif; color: var(--fg); }
+h1, h2, h3 { font-family: 'Space Grotesk', sans-serif; }
+
+/* Buang chrome bawaan Streamlit */
+#MainMenu, footer, [data-testid="stToolbar"] { visibility: hidden; }
+[data-testid="stHeader"] { background: transparent; }
+[data-testid="stDecoration"] { display: none; }
+
+[data-testid="stAppViewContainer"] { background: var(--bg); }
+[data-testid="stAppViewContainer"] > .main > div {
+    padding: 1.5rem 2rem 3rem 2rem !important;
+    max-width: 860px;
+    margin: 0 auto;
+}
+[data-testid="stSidebar"] { background: var(--bg); border-right: 1px solid var(--border); }
+
+/* ── Header ───────────────────────────────────────────────── */
+.app-header {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+    padding-bottom: 1rem;
+    margin-bottom: 1.75rem;
+    border-bottom: 1px solid var(--border);
+}
+.app-header h1 {
+    margin: 0;
+    font-size: 1.3rem;
+    font-weight: 700;
+    letter-spacing: -0.01em;
+}
+.app-header p { margin: 2px 0 0 0; font-size: 0.85rem; color: var(--muted); }
+.status-dot {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-size: 0.78rem; font-weight: 600; color: var(--accent);
+    white-space: nowrap;
+}
+.status-dot::before {
+    content: ""; width: 7px; height: 7px; border-radius: 50%;
+    background: var(--accent);
+}
+
+/* ── Section — pengganti "card" berat, cukup garis & label ─── */
+.section-label {
+    font-size: 0.72rem;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin: 0 0 0.75rem 0;
+}
+/* ── Tombol — default: outline (aksi sekunder) ──────────────── */
+.stButton > button {
+    width: 100%;
+    height: 2.6rem;
+    font-family: 'Inter', sans-serif;
+    font-size: 0.9rem;
+    font-weight: 600;
+    white-space: nowrap;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    background: transparent;
+    border: 1px solid var(--border);
+    transition: border-color 0.15s ease, background 0.15s ease;
+}
+.stButton > button, .stButton > button p { color: var(--fg) !important; }
+.stButton > button:hover { border-color: var(--fg); background: rgba(255,255,255,0.04); }
+.stButton > button:disabled { opacity: 0.45; cursor: not-allowed; }
+
+/* Tombol utama — ditandai marker tak-terlihat sebelum tombolnya */
+.element-container:has(.btn-primary-marker) + .element-container .stButton > button {
+    background: var(--accent);
+    border-color: var(--accent);
+}
+.element-container:has(.btn-primary-marker) + .element-container .stButton > button,
+.element-container:has(.btn-primary-marker) + .element-container .stButton > button p {
+    color: var(--accent-fg) !important;
+}
+.element-container:has(.btn-primary-marker) + .element-container .stButton > button:hover {
+    background: #ffa347;
+    border-color: #ffa347;
+}
+
+/* Tombol bergaya teks bergaris bawah (mis. "Ganti email", "Kirim ulang") */
+.element-container:has(.btn-link-marker) + .element-container .stButton,
+.element-container:has(.btn-link-marker-right) + .element-container .stButton {
+    width: auto;
+    display: inline-block;
+}
+.element-container:has(.btn-link-marker) + .element-container .stButton > button,
+.element-container:has(.btn-link-marker-right) + .element-container .stButton > button {
+    width: auto;
+    height: auto;
+    padding: 0;
+    background: transparent !important;
+    border: none;
+    color: var(--muted) !important;
+    text-decoration: underline;
+    text-underline-offset: 2px;
+    font-weight: 500;
+    font-size: 0.85rem;
+    white-space: nowrap;
+}
+.element-container:has(.btn-link-marker) + .element-container .stButton > button p,
+.element-container:has(.btn-link-marker-right) + .element-container .stButton > button p {
+    color: var(--muted) !important;
+}
+.element-container:has(.btn-link-marker) + .element-container .stButton > button:hover,
+.element-container:has(.btn-link-marker-right) + .element-container .stButton > button:hover {
+    text-decoration: none;
+    background: transparent !important;
+    border: none;
+    color: var(--fg) !important;
+}
+.element-container:has(.btn-link-marker) + .element-container .stButton > button:hover p,
+.element-container:has(.btn-link-marker-right) + .element-container .stButton > button:hover p {
+    color: var(--fg) !important;
+}
+.element-container:has(.btn-link-marker-right) + .element-container { text-align: right; }
+
+/* Rapatkan gap sebelum tombol link (mis. "Ganti email" nempel ke teks di atasnya) */
+.element-container:has(.btn-link-marker) {
+    margin-top: -10px;
+    margin-bottom: -14px;
+}
+
+/* ── Input field ─────────────────────────────────────────── */
+input[type="text"], input[type="password"], input[type="number"],
+[data-testid="stTextInput"] input {
+    background: transparent !important;
+    color: var(--fg) !important;
+    border: 1px solid var(--border) !important;
+    font-size: 1rem !important;
+    height: 2.6rem !important;
+    border-radius: var(--radius-sm) !important;
+}
+[data-testid="stTextInput"] input:focus { border-color: var(--accent) !important; }
+[data-testid="stTextInput"] input::placeholder { color: var(--muted) !important; }
+
+/* Ikon show/hide password — center-kan vertikal di dalam kotak input */
+[data-testid="stTextInput"] div[data-baseweb="base-input"] {
+    display: flex;
+    align-items: center;
+}
+[data-testid="stTextInput"] button {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+}
+
+/* ── Slider ───────────────────────────────────────────────── */
+[data-baseweb="slider"] [role="slider"] { background: var(--accent) !important; }
+
+/* ── Auth (Masuk / Daftar / OTP) ─────────────────────────── */
+.auth-title {
+    font-family: 'Space Grotesk', sans-serif;
+    font-size: 1.5rem;
+    font-weight: 700;
+    margin-bottom: 0.2rem;
+    text-align: center;
+    color: var(--fg);
+}
+.auth-subtitle {
+    font-size: 0.85rem;
+    color: var(--muted);
+    text-align: center;
+    margin-bottom: 1.75rem;
+}
+/* ── Video kamera ────────────────────────────────────────── */
+video {
+    border-radius: var(--radius-md);
+    width: 100% !important;
+    height: auto !important;
+    border: 1px solid var(--border);
+}
+
+/* ── Alert box ───────────────────────────────────────────── */
+[data-testid="stAlert"] { border-radius: var(--radius-sm); }
+
+/* ── Mobile ──────────────────────────────────────────────── */
+@media (max-width: 768px) {
+    [data-testid="stAppViewContainer"] > .main > div {
+        padding: 1rem 1rem 2rem 1rem !important;
+    }
+    [data-testid="column"] {
+        width: 100% !important;
+        flex: 1 1 100% !important;
+        min-width: 100% !important;
+    }
+    .stButton > button { height: 3rem; font-size: 1rem; }
+    input[type="text"], input[type="password"] {
+        height: 3rem !important;
+        font-size: 1rem !important;
+    }
+    .auth-title { font-size: 1.3rem; }
+    .app-header h1 { font-size: 1.1rem; }
+}
+</style>
+""".replace("__BG_COLOR__", BG_COLOR)
+
+# ─── App ─────────────────────────────────────────────────────────────────────
+user, is_guest = resolve_guest_user(get_cookie())
+logged_in = bool(user or is_guest)
 
 query_params = st.experimental_get_query_params()
 if "loc" in query_params:
     set_location_cache(query_params["loc"][0])
 
-if user:
+# ── Page config ───────────────────────────────────────────────────────────────
+st.set_page_config(
+    page_title="Sistem Pendeteksi Kantuk",
+    page_icon="https://cdn-icons-png.flaticon.com/512/1464/1464723.png",
+    layout="wide",
+    initial_sidebar_state="expanded" if logged_in else "collapsed",
+)
+st.markdown(MOBILE_CSS, unsafe_allow_html=True)
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SUDAH LOGIN / TAMU
+# ══════════════════════════════════════════════════════════════════════════════
+if logged_in:
+    display_name = user or "Tamu"
     alarm_file_path = os.path.join("audio", "wake_up.wav")
 
-    st.set_page_config(
-        page_title="Sistem pendeteksi kantuk",
-        page_icon="https://cdn-icons-png.flaticon.com/512/1464/1464723.png",
-        layout="wide",
-        initial_sidebar_state="expanded",
-    )
-
-    # ── GPS realtime dari browser ─────────────────────────────────────────────
+    # GPS realtime
     components.html("""
     <script>
     if (navigator.geolocation) {
@@ -63,75 +374,87 @@ if user:
     </script>
     """, height=0)
 
-    if st.sidebar.button("Logout"):
-        set_cookie("")
+    # Cegah layar mati saat deteksi berjalan
+    components.html("""
+    <script>
+    let wakeLock = null;
+    async function requestWakeLock() {
+        try {
+            wakeLock = await navigator.wakeLock.request("screen");
+        } catch (err) {
+            console.error("Wake lock gagal:", err);
+        }
+    }
+    requestWakeLock();
+    document.addEventListener("visibilitychange", () => {
+        if (document.visibilityState === "visible") requestWakeLock();
+    });
+    </script>
+    """, height=0)
 
-    col1, col2 = st.columns(spec=[6, 2], gap="medium")
+    with st.sidebar:
+        st.markdown(f"**{display_name}**")
+        st.markdown("---")
+        if st.button("Keluar"):
+            # Auto-save sesi aktif sebelum logout
+            if st.session_state.get("is_monitoring") and st.session_state.get("session_id"):
+                pending = video_handler.pending_events if "video_handler" in st.session_state else []
+                if is_guest:
+                    save_guest_session(st.session_state["session_id"], st.session_state.get("guest_session_start"), pending)
+                else:
+                    end_session(st.session_state["session_id"], pending)
+            set_cookie("")
+            st.experimental_rerun()
 
-    with col1:
-        st.title("Sistem Pendeteksi Kantuk Untuk Pengendara Roda Empat")
+    st.markdown("""
+    <div class="app-header">
+        <div>
+            <h1>Pendeteksi Kantuk</h1>
+            <p>Pada pengendara roda empat</p>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
 
-        # ── Baris 1: Waktu alarm & EAR ────────────────────────────────────────
-        with st.container():
-            c1, c2 = st.columns(2)
-            with c1:
-                WAIT_TIME = st.slider(
-                    "Waktu yang dibutuhkan alarm untuk menyala (detik):",
-                    0.0, 5.0, 1.0, 0.25,
-                    help=(
-                        "Berapa lama kondisi kantuk harus berlangsung sebelum alarm berbunyi. "
-                        "Berlaku untuk deteksi mata tertutup, menguap, dan kemiringan kepala. "
-                        "Referensi: Wierwille & Ellsworth (1994) menyarankan 1–2 detik untuk "
-                        "menghindari false alarm."
-                    )
-                )
-            with c2:
-                EAR_THRESH = st.slider(
-                    "Ambang Batas Eye Aspect Ratio (EAR):",
-                    0.0, 0.4, 0.18, 0.01,
-                    help=(
-                        "Nilai EAR di bawah threshold = mata tertutup = mengantuk. "
-                        "Referensi: Soukupová & Čech (2016) menyarankan 0.2–0.25. "
-                        "Turunkan nilainya jika terlalu sensitif, naikkan jika kurang sensitif."
-                    )
-                )
-
-        # ── Baris 2: MAR & Head Tilt ──────────────────────────────────────────
-        with st.container():
-            c3, c4 = st.columns(2)
-            with c3:
-                MAR_THRESH = st.slider(
-                    "Ambang Batas Mouth Aspect Ratio (MAR):",
-                    0.3, 1.0, 0.6, 0.01,
-                    help=(
-                        "Nilai MAR di atas threshold = mulut terbuka lebar = menguap. "
-                        "Referensi: Mandal et al. (2017) & Vural et al. (2007) "
-                        "menyarankan threshold 0.5–0.7, default 0.6."
-                    )
-                )
-            with c4:
-                TILT_THRESH = st.slider(
-                    "Ambang Batas Kemiringan Kepala (derajat):",
-                    5.0, 45.0, 20.0, 1.0,
-                    help=(
-                        "Sudut kemiringan kepala dari posisi tegak. "
-                        "Referensi: Sahayadhas et al. (2012) — kemiringan > 15° = kantuk ringan, "
-                        "> 25°–30° = kantuk berat. "
-                        "Default 20° sebagai nilai tengah yang direkomendasikan. "
-                        "Turunkan nilai untuk deteksi lebih sensitif."
-                    )
-                )
+    # Ambang batas sensor — 1 kolom di mobile, 2 kolom di desktop
+    st.markdown('<p class="section-label">Sensitivitas Deteksi</p>', unsafe_allow_html=True)
+    s1, s2 = st.columns(2)
+    with s1:
+        WAIT_TIME = st.slider("Waktu alarm menyala (detik):", 0.0, 5.0, 1.0, 0.25,
+            help="Berapa lama kondisi kantuk berlangsung sebelum alarm berbunyi. "
+                 "Berlaku untuk semua jenis deteksi. "
+                 "Referensi: Wierwille & Ellsworth (1994) menyarankan 1–2 detik.")
+        MAR_THRESH = st.slider("Ambang batas mulut (menguap):", 0.3, 1.0, 0.6, 0.01,
+            help="Nilai MAR di atas threshold = mulut terbuka lebar = menguap. "
+                 "Referensi: Mandal et al. (2017) & Vural et al. (2007), default 0.6.")
+    with s2:
+        EAR_THRESH = st.slider("Ambang batas mata (tertutup):", 0.0, 0.4, 0.23, 0.01,
+            help="Nilai EAR di bawah threshold = mata tertutup = mengantuk. "
+                 "Referensi: Soukupová & Čech (2016) menyarankan 0.2–0.25.")
+        TILT_THRESH = st.slider("Ambang batas kemiringan kepala (°):", 5.0, 45.0, 20.0, 1.0,
+            help="Sudut kemiringan kepala dari posisi tegak. "
+                 "Referensi: Sahayadhas et al. (2012) — > 15° kantuk ringan, > 25° kantuk berat.")
 
     thresholds = {
-        "EAR_THRESH":  EAR_THRESH,
-        "WAIT_TIME":   WAIT_TIME,
-        "MAR_THRESH":  MAR_THRESH,
-        "TILT_THRESH": TILT_THRESH,
+        "EAR_THRESH": EAR_THRESH, "WAIT_TIME": WAIT_TIME,
+        "MAR_THRESH": MAR_THRESH, "TILT_THRESH": TILT_THRESH,
     }
 
-    video_handler = VideoFrameHandler()
-    audio_handler = AudioFrameHandler(sound_file_path=alarm_file_path)
+    if "session_id"    not in st.session_state: st.session_state["session_id"]    = None
+    if "is_monitoring" not in st.session_state: st.session_state["is_monitoring"] = False
+    if "video_handler" not in st.session_state: st.session_state["video_handler"] = VideoFrameHandler()
 
+    video_handler = st.session_state["video_handler"]
+    if is_guest:
+        video_handler.email_recipients = []
+    else:
+        # Cache per user, bukan query DB tiap rerun — halaman ini di-autorefresh
+        # tiap 1 detik selama monitoring aktif.
+        if st.session_state.get("email_recipient_for") != user:
+            st.session_state["email_recipient_for"] = user
+            recipient_email = get_user_email(user)
+            st.session_state["email_recipient_cached"] = [recipient_email] if recipient_email else []
+        video_handler.email_recipients = st.session_state["email_recipient_cached"]
+    audio_handler = AudioFrameHandler(sound_file_path=alarm_file_path)
     lock = threading.Lock()
     shared_state = {"play_alarm": False}
 
@@ -145,70 +468,257 @@ if user:
     def audio_frame_callback(frame: av.AudioFrame):
         with lock:
             play_alarm = shared_state["play_alarm"]
-        new_frame = audio_handler.process(frame, play_sound=play_alarm)
-        return new_frame
+        return audio_handler.process(frame, play_sound=play_alarm)
 
-    with col1:
-        ctx = webrtc_streamer(
-            key="drowsiness-detection",
-            video_frame_callback=video_frame_callback,
-            audio_frame_callback=audio_frame_callback,
-            rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]},
-            media_stream_constraints={"video": {"height": {"ideal": 480}}, "audio": True},
-            video_html_attrs=VideoHTMLAttributes(autoPlay=True, controls=False, muted=False),
+    ctx = webrtc_streamer(
+        key="drowsiness-detection",
+        video_frame_callback=video_frame_callback,
+        audio_frame_callback=audio_frame_callback,
+        rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]},
+        media_stream_constraints={"video": {"height": {"ideal": 480}}, "audio": True},
+        video_html_attrs=VideoHTMLAttributes(
+            autoPlay=True, controls=False, muted=False,
+            style={"width": "100%", "height": "100%", "objectFit": "cover", "borderRadius": "10px"},
+        ),
+    )
+
+    # Kotak hitam di area kamera sebelum START ditekan adalah placeholder milik
+    # komponen streamlit_webrtc sendiri (bukan tag <video>, jadi style di atas
+    # tidak menjangkaunya) yang dirender di iframe komponennya sendiri — CSS
+    # halaman ini tidak bisa menembus ke sana. Disamakan warnanya lewat JS
+    # (konfirmasi: elemennya #root) supaya menyatu dengan background halaman.
+    components.html("""
+    <script>
+    function applyFixToFrame(f) {
+        try {
+            const idoc = f.contentDocument;
+            if (!idoc || !idoc.getElementById('root')) return;
+            let style = idoc.getElementById('__wc_bg_fix');
+            if (!style) {
+                style = idoc.createElement('style');
+                style.id = '__wc_bg_fix';
+                (idoc.head || idoc.documentElement).appendChild(style);
+            }
+            style.textContent = 'html, body, #root { background: __BG_COLOR__ !important; }';
+        } catch (e) {}
+    }
+    function fixWebrtcPlaceholderBg() {
+        window.parent.document.querySelectorAll('iframe').forEach(function (f) {
+            applyFixToFrame(f);
+            if (!f.dataset.bgFixLoadHooked) {
+                f.dataset.bgFixLoadHooked = '1';
+                f.addEventListener('load', function () { applyFixToFrame(f); });
+            }
+        });
+    }
+    fixWebrtcPlaceholderBg();
+    new MutationObserver(fixWebrtcPlaceholderBg).observe(window.parent.document.body, {childList: true, subtree: true});
+    </script>
+    """.replace("__BG_COLOR__", BG_COLOR), height=0)
+
+    # ── Auto-start saat kamera ON, auto-save saat kamera OFF ─────────────────
+    camera_active = ctx.state.playing if ctx and ctx.state else False
+
+    if camera_active and not st.session_state["is_monitoring"]:
+        # Kamera baru nyala → mulai sesi otomatis
+        if is_guest:
+            sid = f"g_{int(time.time() * 1000)}"
+            st.session_state["guest_session_start"] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        else:
+            sid = start_session(user)
+        st.session_state["session_id"]    = sid
+        st.session_state["is_monitoring"] = True
+        video_handler.pending_events.clear()
+        video_handler._eye_event_start  = None
+        video_handler._yawn_event_start = None
+        video_handler._tilt_event_start = None
+
+    elif not camera_active and st.session_state["is_monitoring"]:
+        # Kamera dimatikan / tab ditutup → auto-save
+        if st.session_state["session_id"] is not None:
+            if is_guest:
+                save_guest_session(st.session_state["session_id"], st.session_state.get("guest_session_start"), video_handler.pending_events)
+            else:
+                end_session(st.session_state["session_id"], video_handler.pending_events)
+            total = len(video_handler.pending_events)
+            st.session_state["is_monitoring"] = False
+            st.session_state["session_id"]    = None
+            video_handler.pending_events.clear()
+            st.success(f"Sesi tersimpan! {total} kejadian kantuk tercatat.")
+
+    # ── Info status ───────────────────────────────────────────────────────────
+    if st.session_state["is_monitoring"]:
+        # Event masuk dari thread kamera di background, jadi skrip perlu
+        # di-rerun berkala biar angkanya ke-update (bukan cuma pas ada
+        # interaksi seperti geser slider).
+        st_autorefresh(interval=1000, key="live_session_counter")
+        st.markdown(
+            f'<span class="status-dot">Sesi aktif — {len(video_handler.pending_events)} kejadian tercatat</span>',
+            unsafe_allow_html=True,
         )
+    elif not camera_active:
+        st.caption("Tekan START pada kamera untuk memulai sesi monitoring.")
 
+# ══════════════════════════════════════════════════════════════════════════════
+# BELUM LOGIN
+# ══════════════════════════════════════════════════════════════════════════════
 else:
-    def set_page(page):
-        st.session_state['page'] = page
+    # Sembunyikan Histori dari sidebar
+    st.markdown("""
+    <style>
+    [data-testid="stSidebarNav"] ul li:nth-child(2) { display: none; }
+    </style>
+    """, unsafe_allow_html=True)
 
     if 'page' not in st.session_state:
         st.session_state['page'] = 'daftar'
 
+    # ── MASUK ─────────────────────────────────────────────────────────────────
     if st.session_state['page'] == 'masuk':
-        st.subheader("Masuk")
-        username = st.text_input("Username")
-        password = st.text_input("Password", type="password")
+        _, auth_col, _ = st.columns([1, 1.4, 1])
+        with auth_col:
+            st.markdown('<div class="auth-title">Masuk</div><div class="auth-subtitle">Sistem Pendeteksi Kantuk</div>', unsafe_allow_html=True)
 
-        if st.button("Masuk"):
-            if not username or not password:
-                st.error("Tolong lengkapi semua field")
-            else:
-                if check_login(username, sha256(password.encode()).hexdigest()):
+            username = st.text_input("Username", placeholder="Masukkan username kamu")
+            password = st.text_input("Password", type="password", placeholder="Masukkan password kamu")
+
+            st.markdown('<div class="btn-primary-marker"></div>', unsafe_allow_html=True)
+            if st.button("Masuk"):
+                if not username or not password:
+                    st.error("Tolong lengkapi semua field.")
+                elif not check_username_exists(username):
+                    st.error("Username belum terdaftar. Silakan daftar terlebih dahulu.")
+                elif check_login(username, sha256(password.encode()).hexdigest()):
                     set_cookie(username)
                     st.success("Masuk berhasil!")
-                    st.rerun()
+                    st.experimental_rerun()
                 else:
-                    st.error("Username/password salah")
+                    st.error("Password salah. Silakan coba lagi.")
 
-        col1, col2 = st.columns([0.25, 1])
-        with col1:
+            st.markdown("---")
             st.markdown("Belum punya akun?")
-        with col2:
-            if st.button("Daftar disini"):
+            if st.button("Daftar di sini"):
                 st.session_state['page'] = 'daftar'
-                st.rerun()
+                st.experimental_rerun()
 
-    if st.session_state['page'] == 'daftar':
-        st.subheader("Daftar")
-        username = st.text_input("Username")
-        email    = st.text_input("Email orang terdekat")
-        password = st.text_input("Password", type="password")
+            st.markdown('<div class="btn-link-marker"></div>', unsafe_allow_html=True)
+            if st.button("Coba tanpa akun", key="guest_btn_masuk"):
+                set_cookie(GUEST_COOKIE_VALUE)
+                st.experimental_rerun()
 
-        if st.button("Daftar"):
-            if not username or not email or not password:
-                st.error("Tolong lengkapi semua field")
-            elif check_username_exists(username):
-                st.error("Username sudah digunakan, mohon gunakan username lain")
+    # ── DAFTAR ────────────────────────────────────────────────────────────────
+    elif st.session_state['page'] == 'daftar':
+        _, auth_col, _ = st.columns([1, 1.4, 1])
+        with auth_col:
+            st.markdown('<div class="auth-title">Daftar Akun</div><div class="auth-subtitle">Buat akun baru kamu</div>', unsafe_allow_html=True)
+
+            # ── Form daftar — disembunyikan begitu kode OTP sudah terkirim ──
+            if not st.session_state.get('otp_step'):
+                username = st.text_input("Username", placeholder="Buat username kamu")
+                email = st.text_input(
+                    "Email orang terdekat (opsional)",
+                    placeholder="contoh: keluarga@gmail.com",
+                    help="Jika diisi, email ini akan menerima notifikasi darurat saat kantuk "
+                         "terdeteksi. Boleh dikosongkan jika tidak diperlukan."
+                )
+                password = st.text_input("Password", type="password", placeholder="Buat password kamu")
+
+                sending_otp = st.session_state.get('sending_otp', False)
+                btn_label = "Kirim Kode Verifikasi" if email.strip() else "Daftar"
+
+                st.markdown('<div class="btn-primary-marker"></div>', unsafe_allow_html=True)
+                if sending_otp:
+                    st.button("Mengirim...", disabled=True, key="send_otp_btn_sending")
+                elif st.button(btn_label, key="send_otp_btn"):
+                    if not username or not password:
+                        st.error("Tolong lengkapi username dan password.")
+                    elif check_username_exists(username):
+                        st.error("Username sudah digunakan. Coba username lain.")
+                    elif not email.strip():
+                        # Tanpa email — daftar langsung, tanpa verifikasi OTP
+                        pw_hash = sha256(password.encode()).hexdigest()
+                        add_user(username, "", pw_hash)
+                        set_cookie(username)
+                        st.success("Akun berhasil dibuat! Selamat datang 🎉")
+                        st.experimental_rerun()
+                    else:
+                        st.session_state['sending_otp']       = True
+                        st.session_state['pending_username']  = username
+                        st.session_state['pending_email']     = email
+                        st.session_state['pending_password']  = password
+                        st.experimental_rerun()
+
+                if sending_otp:
+                    otp = generate_otp()
+                    pw_hash = sha256(st.session_state['pending_password'].encode()).hexdigest()
+                    save_otp(st.session_state['pending_email'], otp, st.session_state['pending_username'], pw_hash)
+                    success = send_otp_email(st.session_state['pending_email'], otp, st.session_state['pending_username'])
+                    st.session_state['sending_otp'] = False
+                    if success:
+                        st.session_state['reg_username']      = st.session_state['pending_username']
+                        st.session_state['reg_email']         = st.session_state['pending_email']
+                        st.session_state['reg_password_hash'] = pw_hash
+                        st.session_state['otp_step']          = True
+                        st.session_state['otp_last_sent']     = time.time()
+                    else:
+                        st.session_state['send_otp_failed'] = True
+                    st.experimental_rerun()
+
+                if st.session_state.pop('send_otp_failed', False):
+                    st.error("Gagal mengirim email. Periksa kembali alamat email dan coba lagi.")
+
+            # ── Verifikasi OTP — muncul menggantikan form, tanpa pindah halaman ──
             else:
-                add_user(username, email, sha256(password.encode()).hexdigest())
-                set_cookie(username)
-                st.rerun()
+                st.markdown('<p class="section-label">Verifikasi</p>', unsafe_allow_html=True)
+                st.markdown(f"Kode dikirim ke **{st.session_state['reg_email']}**")
 
-        col1, col2 = st.columns([0.25, 1])
-        with col1:
+                st.markdown('<div class="btn-link-marker"></div>', unsafe_allow_html=True)
+                if st.button("Ganti email", key="change_email_btn"):
+                    st.session_state['otp_step'] = False
+                    st.experimental_rerun()
+
+                otp_input = st.text_input("Masukkan Kode OTP", placeholder="6 digit kode dari email",
+                                          max_chars=6, key="otp_input")
+
+                st.markdown('<div class="btn-primary-marker"></div>', unsafe_allow_html=True)
+                if st.button("Verifikasi & Buat Akun", key="verify_otp_btn"):
+                    if not otp_input:
+                        st.error("Masukkan kode OTP terlebih dahulu.")
+                    else:
+                        valid, msg = verify_otp(st.session_state['reg_username'], otp_input)
+                        if valid:
+                            set_cookie(st.session_state['reg_username'])
+                            st.success("Akun berhasil dibuat! Selamat datang 🎉")
+                            st.experimental_rerun()
+                        else:
+                            st.error(msg)
+
+                # Tombol kirim ulang, kanan bawah, kena cooldown 30 detik
+                remaining = int(30 - (time.time() - st.session_state.get('otp_last_sent', 0)))
+                # Auto-refresh tiap detik biar angkanya jalan — jeda kalau lagi ngetik OTP
+                # key & limit tetap per siklus kirim, biar hitungan internal komponennya ga ke-lap
+                if remaining > 0 and not otp_input:
+                    st_autorefresh(interval=1000, limit=35, key=f"resend_countdown_{st.session_state['otp_last_sent']}")
+                if remaining > 0:
+                    st.markdown(f'<p style="text-align:right; font-size:0.8rem; color:var(--muted);">Kirim ulang ({remaining}s)</p>', unsafe_allow_html=True)
+                else:
+                    st.markdown('<div class="btn-link-marker-right"></div>', unsafe_allow_html=True)
+                    if st.button("Kirim ulang", key="resend_otp_btn"):
+                        with st.spinner("Mengirim kode..."):
+                            otp = generate_otp()
+                            save_otp(st.session_state['reg_email'], otp, st.session_state['reg_username'], st.session_state['reg_password_hash'])
+                            send_otp_email(st.session_state['reg_email'], otp, st.session_state['reg_username'])
+                            st.session_state['otp_last_sent'] = time.time()
+                        st.experimental_rerun()
+
+            st.markdown("---")
             st.markdown("Sudah punya akun?")
-        with col2:
-            if st.button("Masuk disini"):
-                st.session_state['page'] = 'masuk'
-                st.rerun()
+            if st.button("Masuk di sini"):
+                st.session_state['page']     = 'masuk'
+                st.session_state['otp_step'] = False
+                st.experimental_rerun()
+
+            st.markdown('<div class="btn-link-marker"></div>', unsafe_allow_html=True)
+            if st.button("Coba tanpa akun", key="guest_btn_daftar"):
+                set_cookie(GUEST_COOKIE_VALUE)
+                st.experimental_rerun()

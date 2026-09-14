@@ -3,10 +3,11 @@ pyOpenSSL
 aiortc
 numpy
 pydub
-mediapipe
+mediapipe==0.10.14
 streamlit==1.17.0
 streamlit_webrtc==0.43.4
 streamlit-nested-layout==0.1.1
+streamlit-autorefresh
 altair==4.0
 requests
 python-decouple

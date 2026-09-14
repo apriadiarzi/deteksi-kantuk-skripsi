@@ -11,7 +11,8 @@ import requests
 import os
 import pickle
 import threading
-from database import add_history, add_history_detail
+from datetime import datetime
+# database di-handle dari Streamlit saat Stop
 
 
 def get_cookie():
@@ -88,6 +89,12 @@ def calculate_avg_ear(landmarks, left_eye_idxs, right_eye_idxs, image_w, image_h
 # MAR = (||P2-P8|| + ||P3-P7|| + ||P5-P6||) / (2 * ||P1-P4||)
 
 MOUTH_IDXS = [61, 39, 0, 291, 269, 375, 17, 146]
+
+# Minimum durasi event agar masuk database (detik)
+MIN_DURATION_EYE  = 1.0   # Soukupová & Čech (2016)
+MIN_DURATION_YAWN = 1.0   # Vural et al. (2007)
+MIN_DURATION_TILT = 1.5   # Sahayadhas et al. (2012)
+
 
 def get_mar(landmarks, mouth_idxs, frame_width, frame_height):
     try:
@@ -178,6 +185,21 @@ def plot_text(image, text, origin, color, font=cv2.FONT_HERSHEY_SIMPLEX, fntScal
     image = cv2.putText(image, text, origin, font, fntScale, color, thickness)
     return image
 
+# ─── Low-light Enhancement ────────────────────────────────────────────────────
+# Referensi: Reza (2004) "Realization of the Contrast Limited Adaptive
+# Histogram Equalization (CLAHE) for Real-Time Image Enhancement"
+
+def enhance_low_light(frame):
+    """
+    Tingkatkan kecerahan frame di kondisi minim cahaya menggunakan CLAHE.
+    Hanya channel luminance (Y) yang diproses agar warna tidak berubah drastis.
+    """
+    yuv = cv2.cvtColor(frame, cv2.COLOR_BGR2YUV)
+    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+    yuv[:, :, 0] = clahe.apply(yuv[:, :, 0])
+    return cv2.cvtColor(yuv, cv2.COLOR_YUV2BGR)
+
+
 # ─── Main Handler ─────────────────────────────────────────────────────────────
 
 class VideoFrameHandler:
@@ -185,7 +207,7 @@ class VideoFrameHandler:
         self.api_key        = config('GOOGLE_API_KEY')
         self.email_sender   = "deteksikantuk@gmail.com"
         self.email_password = config('EMAIL_PASSWORD', default='')
-        self.email_recipients = ["apriadiarzi22@gmail.com"]
+        self.email_recipients = []  # diisi dari Streamlit sesuai email akun yang login; kosong = tidak kirim (mis. tamu)
 
         self.eye_idxs = {
             "left":  [362, 385, 387, 263, 373, 380],
@@ -199,6 +221,12 @@ class VideoFrameHandler:
         self.YELLOW = (0, 255, 255)
 
         self.facemesh_model = get_mediapipe_app()
+
+        # Buffer event sementara — di-push ke DB saat user klik Stop
+        self.pending_events    = []
+        self._eye_event_start  = None
+        self._yawn_event_start = None
+        self._tilt_event_start = None
 
         self.state_tracker = {
             # EAR
@@ -253,6 +281,9 @@ class VideoFrameHandler:
         frame.flags.writeable = False
         frame_h, frame_w, _ = frame.shape
 
+        # Enhance frame untuk kondisi minim cahaya (CLAHE)
+        frame = enhance_low_light(frame)
+
         DROWSY_TIME_txt_pos = (10, int(frame_h - 90))
         YAWN_TIME_txt_pos   = (10, int(frame_h - 60))
         TILT_TIME_txt_pos   = (10, int(frame_h - 30))
@@ -285,6 +316,8 @@ class VideoFrameHandler:
 
             # ── Logika EAR ────────────────────────────────────────────────────
             if EAR < thresholds["EAR_THRESH"]:
+                if self._eye_event_start is None:
+                    self._eye_event_start = datetime.now()
                 end_time = time.perf_counter()
                 self.state_tracker["DROWSY_TIME"] += end_time - self.state_tracker["start_time"]
                 self.state_tracker["start_time"]   = end_time
@@ -308,6 +341,15 @@ class VideoFrameHandler:
                         )
                         self.state_tracker["message_sent"] = True
             else:
+                if self._eye_event_start is not None:
+                    duration = self.state_tracker["DROWSY_TIME"]
+                    if duration >= MIN_DURATION_EYE:  # filter noise < 1 detik
+                        self.pending_events.append({
+                            'event_type': 'eye_close',
+                            'event_time': self._eye_event_start.strftime('%Y-%m-%d %H:%M:%S'),
+                            'duration':   round(duration, 2)
+                        })
+                    self._eye_event_start = None
                 self.state_tracker["start_time"]   = time.perf_counter()
                 self.state_tracker["DROWSY_TIME"]   = 0.0
                 self.state_tracker["COLOR"]         = self.GREEN
@@ -316,6 +358,8 @@ class VideoFrameHandler:
 
             # ── Logika MAR ────────────────────────────────────────────────────
             if MAR > thresholds["MAR_THRESH"]:
+                if self._yawn_event_start is None:
+                    self._yawn_event_start = datetime.now()
                 yawn_end = time.perf_counter()
                 self.state_tracker["YAWN_TIME"]       += yawn_end - self.state_tracker["YAWN_start_time"]
                 self.state_tracker["YAWN_start_time"]  = yawn_end
@@ -336,6 +380,15 @@ class VideoFrameHandler:
                     )
                     self.state_tracker["yawn_message_sent"] = True
             else:
+                if self._yawn_event_start is not None:
+                    duration = self.state_tracker["YAWN_TIME"]
+                    if duration >= MIN_DURATION_YAWN:  # filter noise < 1 detik
+                        self.pending_events.append({
+                            'event_type': 'yawn',
+                            'event_time': self._yawn_event_start.strftime('%Y-%m-%d %H:%M:%S'),
+                            'duration':   round(duration, 2)
+                        })
+                    self._yawn_event_start = None
                 self.state_tracker["YAWN_start_time"]   = time.perf_counter()
                 self.state_tracker["YAWN_TIME"]          = 0.0
                 self.state_tracker["is_yawning"]         = False
@@ -344,6 +397,8 @@ class VideoFrameHandler:
 
             # ── Logika Head Tilt ──────────────────────────────────────────────
             if abs_angle > thresholds["TILT_THRESH"]:
+                if self._tilt_event_start is None:
+                    self._tilt_event_start = datetime.now()
                 tilt_end = time.perf_counter()
                 self.state_tracker["TILT_TIME"]       += tilt_end - self.state_tracker["TILT_start_time"]
                 self.state_tracker["TILT_start_time"]  = tilt_end
@@ -364,6 +419,15 @@ class VideoFrameHandler:
                     )
                     self.state_tracker["tilt_message_sent"] = True
             else:
+                if self._tilt_event_start is not None:
+                    duration = self.state_tracker["TILT_TIME"]
+                    if duration >= MIN_DURATION_TILT:  # filter noise < 1.5 detik
+                        self.pending_events.append({
+                            'event_type': 'head_tilt',
+                            'event_time': self._tilt_event_start.strftime('%Y-%m-%d %H:%M:%S'),
+                            'duration':   round(duration, 2)
+                        })
+                    self._tilt_event_start = None
                 self.state_tracker["TILT_start_time"]   = time.perf_counter()
                 self.state_tracker["TILT_TIME"]          = 0.0
                 self.state_tracker["is_tilting"]         = False
