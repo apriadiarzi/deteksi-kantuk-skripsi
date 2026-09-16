@@ -26,8 +26,8 @@ st.markdown("""
 @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap');
 
 :root {
-    --bg:            #0B1F33;
-    --surface:       #102A43;
+    --bg:            #123A63;
+    --surface:       #17477A;
     --primary:       #0068FF;
     --accent:        #00B8D9;
     --accent-bright: #00D4FF;
@@ -47,7 +47,15 @@ h1, h2, h3 { font-family: 'Space Grotesk', sans-serif; }
 [data-testid="stHeader"] { background: transparent; }
 [data-testid="stDecoration"] { display: none; }
 
-[data-testid="stAppViewContainer"] { background: var(--bg); }
+/* Background disamakan dengan halaman utama: warna dasar + dot-grid halus. */
+[data-testid="stAppViewContainer"] {
+    background-color: var(--bg);
+    background-image:
+        radial-gradient(ellipse at 50% 0%, rgba(255,255,255,0.055), transparent 62%),
+        radial-gradient(rgba(255,255,255,0.05) 1px, transparent 1px);
+    background-size: 100% 100%, 22px 22px;
+    background-attachment: fixed;
+}
 [data-testid="stAppViewContainer"] > .main > div { max-width: 780px; margin: 0 auto; }
 [data-testid="stSidebar"] { background: var(--surface); border-right: 1px solid var(--border); }
 [data-testid="stSidebar"] * { color: var(--fg); }
@@ -64,6 +72,10 @@ h1, h2, h3 { font-family: 'Space Grotesk', sans-serif; }
 
 /* Tombol — default outline (sekunder) */
 .stButton > button {
+    width: 100%;
+    height: 2.6rem;
+    font-family: 'IBM Plex Sans', sans-serif;
+    font-size: 0.9rem;
     border: 1px solid var(--border);
     background: transparent;
     border-radius: var(--radius-sm);
@@ -109,6 +121,16 @@ h1, h2, h3 { font-family: 'Space Grotesk', sans-serif; }
 
 [data-testid="stSelectbox"] div[data-baseweb="select"] { cursor: pointer; }
 [data-testid="stDateInput"] div[data-baseweb="base-input"] { cursor: pointer; }
+
+/* Identitas sidebar dijadikan satu blok, supaya jaraknya tidak melebar
+   karena gap antar-elemen bawaan Streamlit. */
+.side-user {
+    padding-bottom: 0.7rem;
+    margin-bottom: 0.7rem;
+    border-bottom: 1px solid var(--border);
+}
+.side-user .name { font-weight: 600; font-size: 0.95rem; }
+.side-user .note { font-size: 0.75rem; line-height: 1.45; color: var(--muted); margin-top: 3px; }
 
 /* Baris kejadian — list rata, bukan tumpukan kartu warna-warni */
 .event-row {
@@ -168,8 +190,22 @@ display_name = user or "Tamu"
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 with st.sidebar:
-    st.markdown(f"**{display_name}**")
-    st.markdown("---")
+    if is_guest:
+        side_note = (
+            "Kamu masuk sebagai Tamu — riwayat cuma disimpan di browser ini "
+            "(maksimal 10 sesi terakhir) dan bisa hilang kalau cache atau data "
+            "browser dibersihkan. Daftar akun supaya riwayatmu tersimpan aman."
+        )
+    else:
+        side_note = "Riwayat kamu tersimpan di akun ini."
+
+    st.markdown(f"""
+    <div class="side-user">
+        <div class="name">{display_name}</div>
+        <div class="note">{side_note}</div>
+    </div>
+    """, unsafe_allow_html=True)
+
     if st.button("Keluar"):
         set_cookie("")
         st.experimental_rerun()
