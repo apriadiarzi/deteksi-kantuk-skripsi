@@ -3,7 +3,7 @@ pyOpenSSL
 aiortc
 numpy
 pydub
-mediapipe==0.10.14
+mediapipe==0.10.11
 streamlit==1.17.0
 streamlit_webrtc==0.43.4
 streamlit-nested-layout==0.1.1
