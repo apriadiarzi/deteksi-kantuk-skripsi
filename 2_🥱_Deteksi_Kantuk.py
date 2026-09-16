@@ -1,4 +1,5 @@
 import os
+import re
 import av
 import random
 import string
@@ -32,6 +33,9 @@ create_db()
 # ── Konstanta email pengirim ──────────────────────────────────────────────────
 EMAIL_SENDER   = "deteksikantuk@gmail.com"
 EMAIL_PASSWORD = config('EMAIL_PASSWORD')
+
+# Berapa detik kamera harus benar-benar mati sebelum sesi dianggap selesai.
+CAMERA_OFF_GRACE = 3.0
 
 # ── Cookie helper ─────────────────────────────────────────────────────────────
 def set_cookie(username):
@@ -79,6 +83,11 @@ def save_guest_session(session_id, start_time_str, events):
     </script>
     """, height=0)
 
+EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+def is_valid_email(value: str) -> bool:
+    return bool(EMAIL_RE.match(value))
+
 # ── Kirim OTP ─────────────────────────────────────────────────────────────────
 def generate_otp(length=6):
     return ''.join(random.choices(string.digits, k=length))
@@ -111,7 +120,7 @@ def send_otp_email(to_email: str, otp_code: str, username: str):
 # ── CSS ────────────────────────────────────────────────────────────────────────
 # Satu arah desain: panel instrumen malam hari — netral gelap + satu warna
 # aksen (amber, kayak lampu peringatan di dashboard mobil), bukan warna-warni.
-BG_COLOR = "#0B1F33"
+BG_COLOR = "#123A63"
 
 MOBILE_CSS = """
 <style>
@@ -119,10 +128,10 @@ MOBILE_CSS = """
 
 :root {
     --bg:         __BG_COLOR__;
-    --surface:    #102A43;
+    --surface:    #17477A;
     --border:     rgba(255,255,255,0.10);
     --fg:         #f5f4f0;
-    --muted:      #8b8b92;
+    --muted:      #9FB3C8;
     --accent:     #ff8a1e;
     --accent-fg:  #16110a;
     --radius-sm:  6px;
@@ -137,13 +146,34 @@ h1, h2, h3 { font-family: 'Space Grotesk', sans-serif; }
 [data-testid="stHeader"] { background: transparent; }
 [data-testid="stDecoration"] { display: none; }
 
-[data-testid="stAppViewContainer"] { background: var(--bg); }
+/* Background: warna dasar + dot-grid halus dan sorotan lembut di tengah atas.
+   Statis (tidak animasi) dan kontras titiknya sangat rendah supaya tidak
+   bikin mata lelah, tapi cukup untuk memberi kesan panel instrumen dan
+   menarik pandangan ke area kamera di tengah. */
+[data-testid="stAppViewContainer"] {
+    background-color: var(--bg);
+    background-image:
+        radial-gradient(ellipse at 50% 0%, rgba(255,255,255,0.055), transparent 62%),
+        radial-gradient(rgba(255,255,255,0.05) 1px, transparent 1px);
+    background-size: 100% 100%, 22px 22px;
+    background-attachment: fixed;
+}
 [data-testid="stAppViewContainer"] > .main > div {
     padding: 1.5rem 2rem 3rem 2rem !important;
     max-width: 860px;
     margin: 0 auto;
 }
-[data-testid="stSidebar"] { background: var(--bg); border-right: 1px solid var(--border); }
+[data-testid="stSidebar"] { background: var(--surface); border-right: 1px solid var(--border); }
+
+/* Identitas sidebar dijadikan satu blok, supaya jaraknya tidak melebar
+   karena gap antar-elemen bawaan Streamlit. */
+.side-user {
+    font-weight: 600;
+    font-size: 0.95rem;
+    padding-bottom: 0.7rem;
+    margin-bottom: 0.7rem;
+    border-bottom: 1px solid var(--border);
+}
 
 /* ── Header ───────────────────────────────────────────────── */
 .app-header {
@@ -269,10 +299,24 @@ input[type="text"], input[type="password"], input[type="number"],
 [data-testid="stTextInput"] input:focus { border-color: var(--accent) !important; }
 [data-testid="stTextInput"] input::placeholder { color: var(--muted) !important; }
 
+/* Validasi field inline ala Instagram — marker sebelum field menandai kotak
+   yang bermasalah dengan border merah, teksnya muncul tepat di bawah field. */
+.element-container:has(.field-error-marker) + .element-container [data-testid="stTextInput"] input {
+    border-color: #ff5c5c !important;
+}
+.field-error-text {
+    margin: -12px 0 10px 0;
+    font-size: 0.8rem;
+    color: #ff5c5c;
+}
+
 /* Ikon show/hide password — center-kan vertikal di dalam kotak input */
 [data-testid="stTextInput"] div[data-baseweb="base-input"] {
     display: flex;
     align-items: center;
+}
+div[data-baseweb="input"].st-ck {
+    padding-right: 0px !important;
 }
 [data-testid="stTextInput"] button {
     display: flex;
@@ -393,8 +437,8 @@ if logged_in:
     """, height=0)
 
     with st.sidebar:
-        st.markdown(f"**{display_name}**")
-        st.markdown("---")
+        st.markdown(f'<div class="side-user">{display_name}</div>', unsafe_allow_html=True)
+
         if st.button("Keluar"):
             # Auto-save sesi aktif sebelum logout
             if st.session_state.get("is_monitoring") and st.session_state.get("session_id"):
@@ -482,44 +526,28 @@ if logged_in:
         ),
     )
 
-    # Kotak hitam di area kamera sebelum START ditekan adalah placeholder milik
-    # komponen streamlit_webrtc sendiri (bukan tag <video>, jadi style di atas
-    # tidak menjangkaunya) yang dirender di iframe komponennya sendiri — CSS
-    # halaman ini tidak bisa menembus ke sana. Disamakan warnanya lewat JS
-    # (konfirmasi: elemennya #root) supaya menyatu dengan background halaman.
-    components.html("""
-    <script>
-    function applyFixToFrame(f) {
-        try {
-            const idoc = f.contentDocument;
-            if (!idoc || !idoc.getElementById('root')) return;
-            let style = idoc.getElementById('__wc_bg_fix');
-            if (!style) {
-                style = idoc.createElement('style');
-                style.id = '__wc_bg_fix';
-                (idoc.head || idoc.documentElement).appendChild(style);
-            }
-            style.textContent = 'html, body, #root { background: __BG_COLOR__ !important; }';
-        } catch (e) {}
-    }
-    function fixWebrtcPlaceholderBg() {
-        window.parent.document.querySelectorAll('iframe').forEach(function (f) {
-            applyFixToFrame(f);
-            if (!f.dataset.bgFixLoadHooked) {
-                f.dataset.bgFixLoadHooked = '1';
-                f.addEventListener('load', function () { applyFixToFrame(f); });
-            }
-        });
-    }
-    fixWebrtcPlaceholderBg();
-    new MutationObserver(fixWebrtcPlaceholderBg).observe(window.parent.document.body, {childList: true, subtree: true});
-    </script>
-    """.replace("__BG_COLOR__", BG_COLOR), height=0)
-
     # ── Auto-start saat kamera ON, auto-save saat kamera OFF ─────────────────
-    camera_active = ctx.state.playing if ctx and ctx.state else False
+    # `playing` bisa False sesaat walau kamera sebenarnya masih jalan (WebRTC
+    # lagi negosiasi / reconnect). Selama masih `signalling`, kamera dianggap
+    # hidup — ini kriteria yang sama dipakai streamlit_webrtc sendiri sebelum
+    # membunuh worker-nya. Tanpa ini sesi bisa tertutup sendiri di tengah jalan.
+    cam_playing    = bool(ctx.state.playing) if ctx and ctx.state else False
+    cam_signalling = bool(ctx.state.signalling) if ctx and ctx.state else False
+    camera_active  = cam_playing or cam_signalling
 
-    if camera_active and not st.session_state["is_monitoring"]:
+    # Diukur pakai jam, bukan jumlah rerun: rerun bisa terjadi beruntun dalam
+    # hitungan milidetik (autorefresh + perubahan nilai komponen barengan),
+    # jadi "sekian kali pengecekan" gampang habis di dalam satu gangguan sesaat.
+    now = time.time()
+    if camera_active:
+        st.session_state["camera_off_since"] = None
+    elif st.session_state.get("camera_off_since") is None:
+        st.session_state["camera_off_since"] = now
+
+    off_since   = st.session_state.get("camera_off_since")
+    camera_off_for = (now - off_since) if off_since else 0.0
+
+    if cam_playing and not st.session_state["is_monitoring"]:
         # Kamera baru nyala → mulai sesi otomatis
         if is_guest:
             sid = f"g_{int(time.time() * 1000)}"
@@ -533,8 +561,10 @@ if logged_in:
         video_handler._yawn_event_start = None
         video_handler._tilt_event_start = None
 
-    elif not camera_active and st.session_state["is_monitoring"]:
-        # Kamera dimatikan / tab ditutup → auto-save
+    # Sesi baru ditutup kalau kamera benar-benar mati selama CAMERA_OFF_GRACE
+    # detik berturut-turut, supaya gangguan sesaat tidak salah dibaca sebagai
+    # user menekan STOP.
+    elif st.session_state["is_monitoring"] and camera_off_for >= CAMERA_OFF_GRACE:
         if st.session_state["session_id"] is not None:
             if is_guest:
                 save_guest_session(st.session_state["session_id"], st.session_state.get("guest_session_start"), video_handler.pending_events)
@@ -543,15 +573,19 @@ if logged_in:
             total = len(video_handler.pending_events)
             st.session_state["is_monitoring"] = False
             st.session_state["session_id"]    = None
+            st.session_state["camera_off_since"] = None
             video_handler.pending_events.clear()
             st.success(f"Sesi tersimpan! {total} kejadian kantuk tercatat.")
 
     # ── Info status ───────────────────────────────────────────────────────────
-    if st.session_state["is_monitoring"]:
-        # Event masuk dari thread kamera di background, jadi skrip perlu
-        # di-rerun berkala biar angkanya ke-update (bukan cuma pas ada
-        # interaksi seperti geser slider).
+    # Rerun berkala selama kamera/sesi hidup: event kantuk masuk dari thread
+    # kamera di background, dan transisi kamera nyala/mati tidak selalu memicu
+    # rerun sendiri — tanpa ini status kamera baru kebaca saat ada interaksi
+    # manual (itu sebabnya START seolah perlu dipencet dua kali).
+    if st.session_state["is_monitoring"] or camera_active:
         st_autorefresh(interval=1000, key="live_session_counter")
+
+    if st.session_state["is_monitoring"]:
         st.markdown(
             f'<span class="status-dot">Sesi aktif — {len(video_handler.pending_events)} kejadian tercatat</span>',
             unsafe_allow_html=True,
@@ -615,25 +649,40 @@ else:
             # ── Form daftar — disembunyikan begitu kode OTP sudah terkirim ──
             if not st.session_state.get('otp_step'):
                 username = st.text_input("Username", placeholder="Buat username kamu")
+                password = st.text_input("Password", type="password", placeholder="Buat password kamu")
+
+                # `key` di sini bikin Streamlit rerun otomatis begitu field ini
+                # kehilangan fokus (blur), dan session_state[key] sudah berisi
+                # nilai terbaru SEBELUM baris ini jalan — jadi validasinya bisa
+                # langsung dibaca duluan, sebelum field-nya sendiri dirender,
+                # tanpa perlu tombol submit atau rerun manual.
+                email_now = st.session_state.get('reg_email_input', '').strip()
+                email_invalid = bool(email_now) and not is_valid_email(email_now)
+
+                if email_invalid:
+                    st.markdown('<div class="field-error-marker"></div>', unsafe_allow_html=True)
                 email = st.text_input(
                     "Email orang terdekat (opsional)",
                     placeholder="contoh: keluarga@gmail.com",
+                    key="reg_email_input",
                     help="Jika diisi, email ini akan menerima notifikasi darurat saat kantuk "
                          "terdeteksi. Boleh dikosongkan jika tidak diperlukan."
                 )
-                password = st.text_input("Password", type="password", placeholder="Buat password kamu")
+                if email_invalid:
+                    st.markdown('<p class="field-error-text">Masukkan alamat email yang valid.</p>', unsafe_allow_html=True)
 
                 sending_otp = st.session_state.get('sending_otp', False)
-                btn_label = "Kirim Kode Verifikasi" if email.strip() else "Daftar"
 
                 st.markdown('<div class="btn-primary-marker"></div>', unsafe_allow_html=True)
                 if sending_otp:
                     st.button("Mengirim...", disabled=True, key="send_otp_btn_sending")
-                elif st.button(btn_label, key="send_otp_btn"):
+                elif st.button("Daftar", key="send_otp_btn"):
                     if not username or not password:
                         st.error("Tolong lengkapi username dan password.")
                     elif check_username_exists(username):
                         st.error("Username sudah digunakan. Coba username lain.")
+                    elif email_invalid:
+                        pass  # sudah kelihatan di teks merah bawah field-nya
                     elif not email.strip():
                         # Tanpa email — daftar langsung, tanpa verifikasi OTP
                         pw_hash = sha256(password.encode()).hexdigest()
