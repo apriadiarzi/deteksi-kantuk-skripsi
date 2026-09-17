@@ -24,3 +24,8 @@ streamlit-autorefresh
 altair==4.0
 requests
 python-decouple
+# Driver Postgres (Neon). Filesystem Streamlit Community Cloud itu ephemeral —
+# container dibangun ulang dari repo tiap redeploy, jadi SQLite lokal selalu
+# ter-reset dan akun yang didaftarkan lewat web hilang. Datanya dipindah ke
+# database eksternal yang hidup di luar container.
+psycopg2-binary
