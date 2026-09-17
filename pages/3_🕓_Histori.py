@@ -6,7 +6,8 @@ import streamlit.components.v1 as components
 from streamlit_autorefresh import st_autorefresh
 from database import (
     get_sessions_by_username, get_events_by_session,
-    resolve_guest_user, GUEST_STORAGE_KEY,
+    resolve_guest_user, GUEST_STORAGE_KEY, GUEST_COOKIE_VALUE,
+    get_username_by_token, clear_session_token, AUTH_STORAGE_KEY,
 )
 
 st.set_page_config(
@@ -161,11 +162,75 @@ h1, h2, h3 { font-family: 'Space Grotesk', sans-serif; }
 # ── Helpers ───────────────────────────────────────────────────────────────────
 # st.session_state, bukan file di server — lihat catatan di 2_🥱_Deteksi_Kantuk.py
 # soal kenapa cookies.pkl (file global di server) adalah bug keamanan serius.
+# Di sini set_cookie cuma dipakai untuk logout, jadi selalu bersihkan token
+# "ingat saya" di localStorage juga (lihat AUTH_STORAGE_KEY / blok pulihkan
+# login di bawah, dan penjelasan lengkapnya di 2_🥱_Deteksi_Kantuk.py).
 def set_cookie(username):
     st.session_state["auth_user"] = username
+    # Ditunda ke render berikutnya, bukan components.html() langsung di sini —
+    # set_cookie() di sini selalu dipanggil tepat sebelum st.experimental_rerun(),
+    # yang bisa memotong pengiriman elemen sebelum sempat "nyantol" ke browser.
+    # Detail lengkapnya di flush_pending_auth_storage_write() @ 2_🥱_Deteksi_Kantuk.py.
+    st.session_state["pending_auth_storage_write"] = "__clear__"
 
 def get_cookie():
     return st.session_state.get("auth_user") or None
+
+def flush_pending_auth_storage_write():
+    if "pending_auth_storage_write" in st.session_state:
+        pending = st.session_state.pop("pending_auth_storage_write")
+        if pending == "__clear__":
+            js = f"try {{ localStorage.removeItem('{AUTH_STORAGE_KEY}'); }} catch(e) {{}}"
+        else:
+            js = f"try {{ localStorage.setItem('{AUTH_STORAGE_KEY}', '{pending}'); }} catch(e) {{}}"
+        components.html(f"<script>{js}</script>", height=0)
+
+flush_pending_auth_storage_write()
+
+# ── Pulihkan login dari token di localStorage browser ────────────────────────
+# Sama seperti di halaman Deteksi Kantuk: session_state hilang tiap refresh
+# browser, jadi tokennya dicek lewat localStorage (per-browser) dan divalidasi
+# ke DB sebelum dipercaya.
+query_params = st.experimental_get_query_params()
+needs_auth_restore = "auth_user" not in st.session_state and not st.session_state.get("auth_restore_done")
+
+if needs_auth_restore:
+    if "authtok" in query_params:
+        token = query_params["authtok"][0]
+        st.session_state["auth_restore_done"] = True
+        if token == GUEST_COOKIE_VALUE:
+            st.session_state["auth_user"] = GUEST_COOKIE_VALUE
+        elif token and token != "-":
+            restored_username = get_username_by_token(token)
+            if restored_username:
+                st.session_state["auth_user"] = restored_username
+            else:
+                components.html(f"""
+                <script>
+                try {{ localStorage.removeItem('{AUTH_STORAGE_KEY}'); }} catch(e) {{}}
+                </script>
+                """, height=0)
+        components.html("""
+        <script>
+        window.parent.history.replaceState(null, "", window.parent.location.pathname);
+        </script>
+        """, height=0)
+        st.experimental_rerun()
+    else:
+        components.html(f"""
+        <script>
+        const p = new URLSearchParams(window.parent.location.search);
+        if (!p.has('authtok')) {{
+            const tok = localStorage.getItem('{AUTH_STORAGE_KEY}') || '-';
+            const url = window.parent.location.pathname + '?authtok=' + encodeURIComponent(tok);
+            window.parent.history.replaceState(null, '', url);
+        }}
+        </script>
+        """, height=0)
+        st.session_state["auth_restore_attempt"] = st.session_state.get("auth_restore_attempt", 0) + 1
+        st_autorefresh(interval=200, limit=2, key=f"auth_restore_{st.session_state['auth_restore_attempt']}")
+        st.info("Memuat sesi...")
+        st.stop()
 
 def fmt_dur(seconds):
     if seconds is None: return "-"
@@ -212,6 +277,8 @@ with st.sidebar:
     """, unsafe_allow_html=True)
 
     if st.button("Keluar"):
+        if not is_guest:
+            clear_session_token(user)
         set_cookie("")
         st.experimental_rerun()
 

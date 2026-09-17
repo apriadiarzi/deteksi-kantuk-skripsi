@@ -20,7 +20,8 @@ from database import (
     create_db, add_user, check_username_exists, check_login,
     start_session, end_session, save_otp, verify_otp, get_user_email,
     resolve_guest_user, compute_session_totals, GUEST_COOKIE_VALUE, GUEST_STORAGE_KEY,
-    now_wib,
+    now_wib, set_session_token, get_username_by_token, clear_session_token,
+    AUTH_STORAGE_KEY,
 )
 from hashlib import sha256
 from decouple import config
@@ -35,7 +36,7 @@ EMAIL_SENDER   = "deteksikantuk@gmail.com"
 EMAIL_PASSWORD = config('EMAIL_PASSWORD')
 
 # Berapa detik kamera harus benar-benar mati sebelum sesi dianggap selesai.
-CAMERA_OFF_GRACE = 3.0
+CAMERA_OFF_GRACE = 0.7
 
 # ── Sesi login ────────────────────────────────────────────────────────────────
 # PENTING: dulu ini disimpan lewat file cookies.pkl di server — itu BUKAN
@@ -43,13 +44,49 @@ CAMERA_OFF_GRACE = 3.0
 # pengunjung. Siapa pun yang login akan menimpa file itu, dan pengunjung lain
 # yang membuka app yang sama otomatis "ikut login" sebagai orang terakhir yang
 # menimpanya — bug keamanan serius di deployment multi-pengguna (Streamlit
-# Cloud). st.session_state benar-benar terpisah per koneksi browser/tab,
-# jadi login satu orang tidak lagi bisa bocor ke orang lain.
+# Cloud). st.session_state benar-benar terpisah per koneksi browser/tab, jadi
+# login satu orang tidak lagi bisa bocor ke orang lain.
+#
+# Supaya tetap login walau tab di-refresh (session_state doang hilang begitu
+# WebSocket-nya putus), kita SIMPAN JUGA sebuah token ke localStorage browser
+# yang bersangkutan lewat JS. Ini beda dari bug cookies.pkl di atas: localStorage
+# sudah per-browser/per-origin dari sananya (tidak pernah dibagi antar
+# pengunjung), dan isinya token acak yang divalidasi ke DB (lihat
+# get_username_by_token di blok "Pulihkan login" di bawah) — bukan username
+# mentah, jadi tidak bisa dipalsukan cuma dengan mengetik nama orang lain di
+# DevTools.
 def set_cookie(username):
     st.session_state["auth_user"] = username
+    if username == GUEST_COOKIE_VALUE:
+        stored_value = GUEST_COOKIE_VALUE
+    elif username:
+        stored_value = set_session_token(username)
+    else:
+        stored_value = None
+
+    # Penulisan ke localStorage DITUNDA ke render berikutnya, bukan
+    # components.html() langsung di sini — set_cookie() selalu dipanggil tepat
+    # sebelum st.experimental_rerun(), dan rerun itu bisa memotong pengiriman
+    # elemen yang baru saja di-queue sebelum sempat "nyantol" ke browser (kasus
+    # yang sama persis dengan toast "Sesi tersimpan" yang sempat hilang).
+    # Tanpa ini, token akun asli bisa gagal menimpa nilai lama (mis. "__guest__"
+    # dari percobaan Mode Tamu sebelumnya) di localStorage.
+    st.session_state["pending_auth_storage_write"] = stored_value if stored_value else "__clear__"
 
 def get_cookie():
     return st.session_state.get("auth_user") or None
+
+def flush_pending_auth_storage_write():
+    """Jalankan penulisan localStorage yang ditunda oleh set_cookie() di
+    render sebelumnya. Harus dipanggil di awal tiap render, sebelum ada
+    st.stop() yang bisa menghalangi ini kejalan."""
+    if "pending_auth_storage_write" in st.session_state:
+        pending = st.session_state.pop("pending_auth_storage_write")
+        if pending == "__clear__":
+            js = f"try {{ localStorage.removeItem('{AUTH_STORAGE_KEY}'); }} catch(e) {{}}"
+        else:
+            js = f"try {{ localStorage.setItem('{AUTH_STORAGE_KEY}', '{pending}'); }} catch(e) {{}}"
+        components.html(f"<script>{js}</script>", height=0)
 
 def save_guest_session(session_id, start_time_str, events):
     """Simpan satu sesi tamu ke localStorage browser (maksimal 10 sesi terbaru)."""
@@ -378,21 +415,76 @@ video {
 """.replace("__BG_COLOR__", BG_COLOR)
 
 # ─── App ─────────────────────────────────────────────────────────────────────
-user, is_guest = resolve_guest_user(get_cookie())
-logged_in = bool(user or is_guest)
-
 query_params = st.experimental_get_query_params()
 if "loc" in query_params:
     set_location_cache(query_params["loc"][0])
+
+# Sesi baru (abis refresh / tab baru) belum tahu siapa usernya sampai token di
+# localStorage browser ini sempat dibaca — lihat blok "Pulihkan login" di bawah.
+needs_auth_restore = "auth_user" not in st.session_state and not st.session_state.get("auth_restore_done")
 
 # ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="Sistem Pendeteksi Kantuk",
     page_icon="https://cdn-icons-png.flaticon.com/512/1464/1464723.png",
     layout="wide",
-    initial_sidebar_state="expanded" if logged_in else "collapsed",
+    initial_sidebar_state="collapsed" if needs_auth_restore else ("expanded" if get_cookie() else "collapsed"),
 )
 st.markdown(MOBILE_CSS, unsafe_allow_html=True)
+flush_pending_auth_storage_write()
+
+# ── Pulihkan login dari token di localStorage browser ────────────────────────
+# Streamlit tidak menyimpan session_state lewat refresh browser (WebSocket
+# lama putus, sesi baru dibuat) — makanya dulu selalu balik ke halaman login.
+# Di sini kita cek localStorage LEWAT JS (bukan file di server!), kirim
+# hasilnya balik lewat query param URL, lalu divalidasi ke DB. Coba SEKALI
+# saja per sesi (auth_restore_done) supaya tidak looping kalau localStorage
+# kosong/invalid.
+if needs_auth_restore:
+    if "authtok" in query_params:
+        token = query_params["authtok"][0]
+        st.session_state["auth_restore_done"] = True
+        if token == GUEST_COOKIE_VALUE:
+            st.session_state["auth_user"] = GUEST_COOKIE_VALUE
+        elif token and token != "-":
+            restored_username = get_username_by_token(token)
+            if restored_username:
+                st.session_state["auth_user"] = restored_username
+            else:
+                # Token basi/tidak valid — bersihkan supaya tidak diulang tiap kunjungan.
+                components.html(f"""
+                <script>
+                try {{ localStorage.removeItem('{AUTH_STORAGE_KEY}'); }} catch(e) {{}}
+                </script>
+                """, height=0)
+        # Bersihkan token dari address bar — kalau nyangkut kelihatan di URL,
+        # bisa ke-screenshot/ke-share orang lain dan dipakai login tanpa password.
+        components.html("""
+        <script>
+        window.parent.history.replaceState(null, "", window.parent.location.pathname);
+        </script>
+        """, height=0)
+        st.experimental_rerun()
+    else:
+        components.html(f"""
+        <script>
+        const p = new URLSearchParams(window.parent.location.search);
+        if (!p.has('authtok')) {{
+            const tok = localStorage.getItem('{AUTH_STORAGE_KEY}') || '-';
+            const url = window.parent.location.pathname + '?authtok=' + encodeURIComponent(tok);
+            window.parent.history.replaceState(null, '', url);
+        }}
+        </script>
+        """, height=0)
+        # Key diberi suffix unik per percobaan — limit st_autorefresh terikat
+        # ke key seumur sesi, jadi tanpa ini pemulihan cuma jalan sekali.
+        st.session_state["auth_restore_attempt"] = st.session_state.get("auth_restore_attempt", 0) + 1
+        st_autorefresh(interval=200, limit=2, key=f"auth_restore_{st.session_state['auth_restore_attempt']}")
+        st.caption("Memuat sesi...")
+        st.stop()
+
+user, is_guest = resolve_guest_user(get_cookie())
+logged_in = bool(user or is_guest)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # SUDAH LOGIN / TAMU
@@ -465,6 +557,8 @@ if logged_in:
                     save_guest_session(st.session_state["session_id"], st.session_state.get("guest_session_start"), pending)
                 else:
                     end_session(st.session_state["session_id"], pending)
+            if not is_guest:
+                clear_session_token(user)
             set_cookie("")
             st.experimental_rerun()
 
@@ -476,6 +570,9 @@ if logged_in:
         </div>
     </div>
     """, unsafe_allow_html=True)
+
+    if st.session_state.get("session_saved_msg"):
+        st.success(st.session_state.pop("session_saved_msg"))
 
     # Ambang batas sensor — 1 kolom di mobile, 2 kolom di desktop
     st.markdown('<p class="section-label">Sensitivitas Deteksi</p>', unsafe_allow_html=True)
@@ -530,6 +627,20 @@ if logged_in:
     # loading terus) setelah STOP lalu START cepat-cepat.
     if "webrtc_key_suffix" not in st.session_state:
         st.session_state["webrtc_key_suffix"] = 0
+
+    # Begitu sebuah sesi baru saja ditutup (lihat blok auto-stop di bawah), ada
+    # jeda singkat sebelum instance komponen kamera yang BARU (key baru)
+    # benar-benar terpasang. Kalau user sempat klik START pada instance LAMA
+    # tepat di jeda itu, kliknya "hilang" (komponennya keburu diganti) — dari
+    # sisi user kelihatannya kayak videonya kerefresh sendiri dan harus klik
+    # START sekali lagi. Untuk mencegah itu, komponennya sengaja TIDAK
+    # dirender dulu selama jeda ini — user lihat pesan singkat, bukan tombol
+    # yang bisa diklik ke instance yang sudah mau dibuang.
+    cooldown_until = st.session_state.get("webrtc_cooldown_until", 0)
+    if time.time() < cooldown_until:
+        st.caption("Menyiapkan kamera untuk sesi berikutnya...")
+        st_autorefresh(interval=150, limit=10, key=f"webrtc_cooldown_{st.session_state['webrtc_key_suffix']}")
+        st.stop()
 
     ctx = webrtc_streamer(
         key=f"drowsiness-detection-{st.session_state['webrtc_key_suffix']}",
@@ -592,8 +703,15 @@ if logged_in:
             st.session_state["session_id"]    = None
             st.session_state["camera_off_since"] = None
             st.session_state["webrtc_key_suffix"] += 1
+            st.session_state["webrtc_cooldown_until"] = time.time() + 0.6
             video_handler.pending_events.clear()
-            st.success(f"Sesi tersimpan! {total} kejadian kantuk tercatat.")
+            # Pesannya DITUNDA ke render berikutnya (bukan st.success() di sini
+            # langsung) — soalnya rerun di bawah ini memotong render saat itu
+            # juga, jadi pesan yang dipanggil sebelum rerun tidak akan sempat
+            # kelihatan sama sekali. Rerun-nya sendiri tetap perlu dilakukan
+            # SEKARANG (bukan nunggu interaksi lain) supaya klik START
+            # berikutnya sudah kena instance komponen kamera yang baru.
+            st.session_state["session_saved_msg"] = f"Sesi tersimpan! {total} kejadian kantuk tercatat."
             st.experimental_rerun()
 
     # ── Info status ───────────────────────────────────────────────────────────
@@ -601,8 +719,13 @@ if logged_in:
     # kamera di background, dan transisi kamera nyala/mati tidak selalu memicu
     # rerun sendiri — tanpa ini status kamera baru kebaca saat ada interaksi
     # manual (itu sebabnya START seolah perlu dipencet dua kali).
+    # Begitu kamera terdeteksi mati (camera_off_since kesetel), poll dipercepat
+    # supaya ambang CAMERA_OFF_GRACE kedeteksi hampir seketika — kalau tetap
+    # 1 detik, "Sesi aktif" bisa nyangkut sampai ~1 detik ekstra di atas grace
+    # period-nya sendiri sebelum toast "Sesi tersimpan" muncul.
     if st.session_state["is_monitoring"] or camera_active:
-        st_autorefresh(interval=1000, key="live_session_counter")
+        poll_interval = 200 if st.session_state.get("camera_off_since") else 1000
+        st_autorefresh(interval=poll_interval, key="live_session_counter")
 
     if st.session_state["is_monitoring"]:
         st.markdown(
