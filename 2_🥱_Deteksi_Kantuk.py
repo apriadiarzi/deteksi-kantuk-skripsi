@@ -315,7 +315,7 @@ input[type="text"], input[type="password"], input[type="number"],
     display: flex;
     align-items: center;
 }
-div[data-baseweb="input"].st-ck {
+div[data-baseweb="input"].st-ck, div[data-baseweb="input"].st-cm {
     padding-right: 0px !important;
 }
 [data-testid="stTextInput"] button {
