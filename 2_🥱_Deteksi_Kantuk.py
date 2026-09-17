@@ -26,6 +26,7 @@ from database import (
 )
 from hashlib import sha256
 from decouple import config
+import requests
 import time
 import json
 from datetime import datetime
@@ -38,10 +39,56 @@ EMAIL_PASSWORD = config('EMAIL_PASSWORD')
 
 # Berapa detik kamera harus benar-benar mati sebelum sesi dianggap selesai.
 # Jangan dibikin terlalu pendek: kalau koneksi WebRTC sempat goyang sebentar,
-# sesi keburu dianggap selesai dan komponen kameranya di-remount (lihat
-# webrtc_key_suffix) — dari sisi user kelihatannya kayak halaman kerefresh
-# sendiri dan harus klik START lagi.
-CAMERA_OFF_GRACE = 1.5
+# sesi keburu dianggap selesai padahal user tidak menekan STOP.
+CAMERA_OFF_GRACE = 3.0
+
+# ── STUN/TURN ─────────────────────────────────────────────────────────────────
+# Di localhost, STUN saja cukup karena browser dan server ada di mesin yang
+# sama. Begitu di-deploy ke Streamlit Community Cloud, servernya ada di balik
+# proxy/firewall yang memblokir jalur WebRTC langsung: negosiasi ICE mentok di
+# status `signalling` dan tidak pernah sampai `playing`, jadi videonya kosong
+# terus walau tombolnya sudah berubah jadi STOP. TURN dipakai sebagai perantara
+# yang melewatkan media saat jalur langsung tidak bisa terbentuk.
+#
+# Kredensial dibaca dari Secrets (Streamlit Cloud) / .env (lokal), tidak pernah
+# masuk git. Kalau belum diisi, otomatis balik ke STUN-only supaya development
+# di lokal tetap jalan tanpa perlu setup apa pun.
+METERED_APP_NAME = config('METERED_APP_NAME', default='')
+METERED_API_KEY  = config('METERED_API_KEY', default='')
+
+STUN_ONLY = [{"urls": ["stun:stun.l.google.com:19302"]}]
+
+def build_ice_servers():
+    """Ambil daftar server ICE (STUN + TURN) dari Metered.
+
+    Kredensial TURN-nya berumur pendek dan diambil lewat API, jadi yang
+    disimpan di Secrets cuma nama app + API key. Hasilnya di-cache karena
+    halaman ini di-rerun tiap detik saat monitoring aktif — tidak perlu
+    menembak API tiap rerun.
+    """
+    if not (METERED_APP_NAME and METERED_API_KEY):
+        return STUN_ONLY
+
+    cached = st.session_state.get("ice_servers_cache")
+    if cached and time.time() < cached["expires"]:
+        return cached["servers"]
+
+    try:
+        resp = requests.get(
+            f"https://{METERED_APP_NAME}.metered.live/api/v1/turn/credentials",
+            params={"apiKey": METERED_API_KEY},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        servers = resp.json()
+    except Exception as e:
+        # Jangan sampai app mati cuma karena TURN tidak terjangkau — di lokal
+        # STUN saja memang sudah cukup.
+        print(f"Gagal ambil kredensial TURN: {e}")
+        return STUN_ONLY
+
+    st.session_state["ice_servers_cache"] = {"servers": servers, "expires": time.time() + 1800}
+    return servers
 
 # ── Sesi login ────────────────────────────────────────────────────────────────
 # PENTING: dulu ini disimpan lewat file cookies.pkl di server — itu BUKAN
@@ -115,6 +162,10 @@ def save_guest_session(session_id, start_time_str, events):
         "total_head_tilt": total_head_tilt,
         "events": events,
     }
+    # Tandai supaya halaman Histori tahu isi localStorage sudah berubah dan
+    # harus mengambil ulang, bukan memakai data yang terlanjur nyangkut di URL.
+    st.session_state["guest_history_dirty"] = True
+
     payload = json.dumps(session_data).replace("</", "<\\/")
     components.html(f"""
     <script>
@@ -449,22 +500,10 @@ if needs_auth_restore:
     if "authtok" in query_params:
         token = query_params["authtok"][0]
         st.session_state["auth_restore_done"] = True
-        # DIAGNOSTIK SEMENTARA — tokennya tidak pernah ditampilkan utuh, cuma
-        # bentuknya, karena itu kredensial. Hapus kalau sudah ketemu masalahnya.
-        if not token or token == "-":
-            st.session_state["auth_restore_debug"] = "localStorage KOSONG (token tidak pernah tersimpan di browser)"
-        elif token == GUEST_COOKIE_VALUE:
-            st.session_state["auth_restore_debug"] = "localStorage berisi penanda TAMU"
-        else:
-            st.session_state["auth_restore_debug"] = f"localStorage berisi token ({len(token)} karakter, diawali {token[:6]}…)"
         if token == GUEST_COOKIE_VALUE:
             st.session_state["auth_user"] = GUEST_COOKIE_VALUE
         elif token and token != "-":
             restored_username = get_username_by_token(token)
-            st.session_state["auth_restore_debug"] += (
-                f" → cocok dengan akun '{restored_username}'" if restored_username
-                else " → TIDAK ADA akun dengan token ini di database"
-            )
             if restored_username:
                 st.session_state["auth_user"] = restored_username
             else:
@@ -588,9 +627,6 @@ if logged_in:
     </div>
     """, unsafe_allow_html=True)
 
-    if st.session_state.get("session_saved_msg"):
-        st.success(st.session_state.pop("session_saved_msg"))
-
     # Ambang batas sensor — 1 kolom di mobile, 2 kolom di desktop
     st.markdown('<p class="section-label">Sensitivitas Deteksi</p>', unsafe_allow_html=True)
     s1, s2 = st.columns(2)
@@ -635,11 +671,12 @@ if logged_in:
         except Exception:
             # Callback ini jalan di thread kamera. Kalau error-nya dibiarkan
             # lolos, aiortc menelannya diam-diam: frame berhenti dikirim,
-            # video jadi kosong, dan tidak ada pesan apa pun di layar. Jejaknya
-            # disimpan di video_handler supaya bisa ditampilkan dari main
-            # thread, dan frame aslinya tetap dikembalikan supaya koneksinya
-            # tidak ikut mati.
-            video_handler.last_error = traceback.format_exc()
+            # video jadi kosong, tanpa pesan apa pun. Dicetak ke log supaya
+            # bisa dilacak, ditandai supaya main thread bisa memberi tahu user,
+            # dan frame aslinya tetap dikembalikan supaya koneksinya tidak
+            # ikut mati.
+            video_handler.last_error = True
+            print("Error di video_frame_callback:\n" + traceback.format_exc())
             return frame
 
     def audio_frame_callback(frame: av.AudioFrame):
@@ -647,33 +684,15 @@ if logged_in:
             play_alarm = shared_state["play_alarm"]
         return audio_handler.process(frame, play_sound=play_alarm)
 
-    # Key dibuat dinamis (bukan string tetap) — setelah sebuah sesi berakhir,
-    # angkanya dinaikkan (lihat blok auto-stop di bawah) supaya START berikutnya
-    # memasang instance komponen webrtc yang benar-benar baru, bukan memakai
-    # ulang koneksi lama yang kadang macet nyambung lagi (video cuma muter
-    # loading terus) setelah STOP lalu START cepat-cepat.
-    if "webrtc_key_suffix" not in st.session_state:
-        st.session_state["webrtc_key_suffix"] = 0
-
-    # Begitu sebuah sesi baru saja ditutup (lihat blok auto-stop di bawah), ada
-    # jeda singkat sebelum instance komponen kamera yang BARU (key baru)
-    # benar-benar terpasang. Kalau user sempat klik START pada instance LAMA
-    # tepat di jeda itu, kliknya "hilang" (komponennya keburu diganti) — dari
-    # sisi user kelihatannya kayak videonya kerefresh sendiri dan harus klik
-    # START sekali lagi. Untuk mencegah itu, komponennya sengaja TIDAK
-    # dirender dulu selama jeda ini — user lihat pesan singkat, bukan tombol
-    # yang bisa diklik ke instance yang sudah mau dibuang.
-    cooldown_until = st.session_state.get("webrtc_cooldown_until", 0)
-    if time.time() < cooldown_until:
-        st.caption("Menyiapkan kamera untuk sesi berikutnya...")
-        st_autorefresh(interval=150, limit=10, key=f"webrtc_cooldown_{st.session_state['webrtc_key_suffix']}")
-        st.stop()
-
+    # Key sengaja TETAP, bukan dinamis. Sempat dibuat berubah tiap sesi selesai
+    # untuk mengakali START yang kadang macet, tapi itu menyisakan instance
+    # komponen lama tiap siklus STOP→START — dugaan kuat penyebab kamera makin
+    # sering gagal nyambung setelah dipakai beberapa kali.
     ctx = webrtc_streamer(
-        key=f"drowsiness-detection-{st.session_state['webrtc_key_suffix']}",
+        key="drowsiness-detection",
         video_frame_callback=video_frame_callback,
         audio_frame_callback=audio_frame_callback,
-        rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]},
+        rtc_configuration={"iceServers": build_ice_servers()},
         media_stream_constraints={"video": {"height": {"ideal": 480}}, "audio": True},
         video_html_attrs=VideoHTMLAttributes(
             autoPlay=True, controls=False, muted=False,
@@ -729,30 +748,20 @@ if logged_in:
             st.session_state["is_monitoring"] = False
             st.session_state["session_id"]    = None
             st.session_state["camera_off_since"] = None
-            st.session_state["webrtc_key_suffix"] += 1
-            st.session_state["webrtc_cooldown_until"] = time.time() + 0.6
             video_handler.pending_events.clear()
-            # Pesannya DITUNDA ke render berikutnya (bukan st.success() di sini
-            # langsung) — soalnya rerun di bawah ini memotong render saat itu
-            # juga, jadi pesan yang dipanggil sebelum rerun tidak akan sempat
-            # kelihatan sama sekali. Rerun-nya sendiri tetap perlu dilakukan
-            # SEKARANG (bukan nunggu interaksi lain) supaya klik START
-            # berikutnya sudah kena instance komponen kamera yang baru.
-            st.session_state["session_saved_msg"] = f"Sesi tersimpan! {total} kejadian kantuk tercatat."
-            st.experimental_rerun()
+            # JANGAN panggil st.experimental_rerun() di sini. Untuk mode tamu,
+            # save_guest_session() di atas menulis ke localStorage lewat
+            # components.html, dan rerun akan memotong render sebelum elemen
+            # itu sampai ke browser — sesinya jadi tidak pernah tersimpan.
+            st.success(f"Sesi tersimpan! {total} kejadian kantuk tercatat.")
 
     # ── Info status ───────────────────────────────────────────────────────────
     # Rerun berkala selama kamera/sesi hidup: event kantuk masuk dari thread
     # kamera di background, dan transisi kamera nyala/mati tidak selalu memicu
     # rerun sendiri — tanpa ini status kamera baru kebaca saat ada interaksi
     # manual (itu sebabnya START seolah perlu dipencet dua kali).
-    # Begitu kamera terdeteksi mati (camera_off_since kesetel), poll dipercepat
-    # supaya ambang CAMERA_OFF_GRACE kedeteksi hampir seketika — kalau tetap
-    # 1 detik, "Sesi aktif" bisa nyangkut sampai ~1 detik ekstra di atas grace
-    # period-nya sendiri sebelum toast "Sesi tersimpan" muncul.
     if st.session_state["is_monitoring"] or camera_active:
-        poll_interval = 200 if st.session_state.get("camera_off_since") else 1000
-        st_autorefresh(interval=poll_interval, key="live_session_counter")
+        st_autorefresh(interval=1000, key="live_session_counter")
 
     if st.session_state["is_monitoring"]:
         st.markdown(
@@ -762,18 +771,8 @@ if logged_in:
     elif not camera_active:
         st.caption("Tekan START pada kamera untuk memulai sesi monitoring.")
 
-    # Error dari thread kamera — lihat catatan di video_frame_callback.
     if getattr(video_handler, "last_error", None):
-        st.error("Error saat memproses frame kamera:")
-        st.code(video_handler.last_error)
-
-    # DIAGNOSTIK SEMENTARA — buat melacak kenapa koneksi kamera putus sendiri
-    # di Streamlit Cloud. Hapus kalau sudah ketemu penyebabnya.
-    st.caption(
-        f"diagnostik · playing={cam_playing} · signalling={cam_signalling} · "
-        f"mati_selama={camera_off_for:.1f}s · monitoring={st.session_state['is_monitoring']} · "
-        f"key={st.session_state['webrtc_key_suffix']}"
-    )
+        st.warning("Ada gangguan saat memproses frame kamera. Detailnya tercatat di log aplikasi.")
 
 # ══════════════════════════════════════════════════════════════════════════════
 # BELUM LOGIN
@@ -788,9 +787,6 @@ else:
 
     if 'page' not in st.session_state:
         st.session_state['page'] = 'daftar'
-
-    # DIAGNOSTIK SEMENTARA — kenapa sesi login tidak ikut pulih setelah refresh.
-    st.caption(f"diagnostik pulihkan-login · {st.session_state.get('auth_restore_debug', 'blok pemulihan tidak pernah jalan')}")
 
     # ── MASUK ─────────────────────────────────────────────────────────────────
     if st.session_state['page'] == 'masuk':

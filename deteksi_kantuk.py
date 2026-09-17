@@ -165,11 +165,20 @@ def plot_head_tilt(frame, left_pt, right_pt, angle, color):
         cv2.line(frame, left_pt, right_pt, color, 2)
         mid_x = (left_pt[0] + right_pt[0]) // 2
         mid_y = (left_pt[1] + right_pt[1]) // 2
-        cv2.putText(frame, f"{angle:.1f}deg", (mid_x - 30, mid_y - 10),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+        s = max(0.3, min(0.6, frame.shape[1] / 640 * 0.5))
+        cv2.putText(frame, f"{angle:.1f}deg", (int(mid_x - 30 * s * 2), mid_y - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX, s, color, 1)
     return frame
 
-def plot_text(image, text, origin, color, font=cv2.FONT_HERSHEY_SIMPLEX, fntScale=0.8, thickness=2):
+def plot_text(image, text, origin, color, font=cv2.FONT_HERSHEY_SIMPLEX, fntScale=None, thickness=None):
+    # Ukuran huruf mengikuti lebar frame, bukan dipatok tetap. WebRTC
+    # menurunkan resolusi sendiri saat CPU/bandwidth tertekan, dan ukuran tetap
+    # bikin tulisannya menutupi wajah begitu frame-nya mengecil. Dikalibrasi
+    # supaya frame selebar 640px tetap terlihat seperti sebelumnya (0.8).
+    if fntScale is None:
+        fntScale = max(0.35, min(1.0, image.shape[1] / 640 * 0.8))
+    if thickness is None:
+        thickness = max(1, round(fntScale * 2.5))
     image = cv2.putText(image, text, origin, font, fntScale, color, thickness)
     return image
 
@@ -272,13 +281,23 @@ class VideoFrameHandler:
         # Enhance frame untuk kondisi minim cahaya (CLAHE)
         frame = enhance_low_light(frame)
 
-        DROWSY_TIME_txt_pos = (10, int(frame_h - 90))
-        YAWN_TIME_txt_pos   = (10, int(frame_h - 60))
-        TILT_TIME_txt_pos   = (10, int(frame_h - 30))
-        WARN_DROWSY_pos = (10, int(frame_h / 2 - 20))
-        WARN_YAWN_pos   = (10, int(frame_h / 2 + 20))
-        WARN_TILT_pos   = (10, int(frame_h / 2 + 60))
-        ALM_txt_pos     = (10, int(frame_h / 2 - 60))
+        # Jarak antar baris ikut lebar frame, sejalan dengan ukuran huruf di
+        # plot_text() — kalau dipatok tetap, teksnya jadi terlalu renggang di
+        # frame kecil dan terlalu rapat di frame besar.
+        ui = max(0.45, min(1.25, frame_w / 640))
+        pad, line = int(10 * ui), int(30 * ui)
+
+        self.EAR_txt_pos  = (pad, line)
+        self.MAR_txt_pos  = (pad, line * 2)
+        self.TILT_txt_pos = (pad, line * 3)
+
+        DROWSY_TIME_txt_pos = (pad, int(frame_h - line * 3))
+        YAWN_TIME_txt_pos   = (pad, int(frame_h - line * 2))
+        TILT_TIME_txt_pos   = (pad, int(frame_h - line))
+        WARN_DROWSY_pos = (pad, int(frame_h / 2 - line * 0.7))
+        WARN_YAWN_pos   = (pad, int(frame_h / 2 + line * 0.7))
+        WARN_TILT_pos   = (pad, int(frame_h / 2 + line * 2))
+        ALM_txt_pos     = (pad, int(frame_h / 2 - line * 2))
 
         results = self.facemesh_model.process(frame)
         frame.flags.writeable = True

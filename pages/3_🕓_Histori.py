@@ -295,7 +295,10 @@ st.markdown(f"""
 events_by_session = None
 if is_guest:
     query_params = st.experimental_get_query_params()
-    if "gdata" in query_params:
+    # Kalau halaman utama baru saja menyimpan sesi tamu, data yang nyangkut di
+    # URL sudah basi — paksa ambil ulang dari localStorage.
+    need_fresh = st.session_state.get("guest_history_dirty", False)
+    if "gdata" in query_params and not need_fresh:
         try:
             guest_raw = json.loads(unquote(query_params["gdata"][0]))
         except Exception:
@@ -310,16 +313,17 @@ if is_guest:
             for s in guest_raw
         }
     else:
+        # Selalu tulis ulang, tanpa cek "kalau belum ada di URL" — justru cek
+        # itu yang bikin sesi tamu yang baru selesai tidak pernah kelihatan
+        # sampai halaman di-refresh manual.
         components.html(f"""
         <script>
-        const p = new URLSearchParams(window.parent.location.search);
-        if (!p.has('gdata')) {{
-            const raw = localStorage.getItem('{GUEST_STORAGE_KEY}') || '[]';
-            const url = window.parent.location.pathname + '?gdata=' + encodeURIComponent(raw);
-            window.parent.history.replaceState(null, '', url);
-        }}
+        const raw = localStorage.getItem('{GUEST_STORAGE_KEY}') || '[]';
+        const url = window.parent.location.pathname + '?gdata=' + encodeURIComponent(raw);
+        window.parent.history.replaceState(null, '', url);
         </script>
         """, height=0)
+        st.session_state["guest_history_dirty"] = False
         # Key diberi suffix unik per kunjungan halaman ini, karena limit
         # st_autorefresh terikat ke key seumur sesi — key tetap akan "habis"
         # dan tidak jalan lagi saat halaman ini dibuka ulang.
