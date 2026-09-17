@@ -1,8 +1,14 @@
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 
 DB_PATH = 'user_data.db'
+
+def now_wib():
+    """Waktu sekarang di WIB (UTC+7), dihitung dari UTC — jadi tidak
+    tergantung timezone server (server cloud biasanya UTC, laptop lokal bisa
+    beda-beda), supaya jam yang tersimpan selalu konsisten di WIB."""
+    return datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(hours=7)
 
 # ─── Mode Tamu ────────────────────────────────────────────────────────────────
 # Ditandai lewat cookie yang sama dengan login biasa (bukan session_state) agar
@@ -91,7 +97,7 @@ def save_otp(email, otp_code, username, password):
     cursor.execute('DELETE FROM pending_registrations WHERE username=? OR email=?', (username, email))
     cursor.execute(
         'INSERT INTO pending_registrations (username, email, password, otp_code, created_at) VALUES (?, ?, ?, ?, ?)',
-        (username, email, password, otp_code, datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+        (username, email, password, otp_code, now_wib().strftime('%Y-%m-%d %H:%M:%S'))
     )
     conn.commit()
     conn.close()
@@ -116,7 +122,7 @@ def verify_otp(username, otp_input):
 
     # Cek expired (10 menit)
     created_dt = datetime.strptime(created_at, '%Y-%m-%d %H:%M:%S')
-    if (datetime.now() - created_dt).total_seconds() > 600:
+    if (now_wib() - created_dt).total_seconds() > 600:
         cursor.execute('DELETE FROM pending_registrations WHERE username=?', (username,))
         conn.commit()
         conn.close()
@@ -192,7 +198,7 @@ def start_session(username):
     if user_id is None:
         return None
 
-    start_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    start_time = now_wib().strftime('%Y-%m-%d %H:%M:%S')
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute(
@@ -219,7 +225,7 @@ def end_session(session_id, events: list):
     if session_id is None:
         return
 
-    end_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    end_time = now_wib().strftime('%Y-%m-%d %H:%M:%S')
 
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()

@@ -20,10 +20,10 @@ from database import (
     create_db, add_user, check_username_exists, check_login,
     start_session, end_session, save_otp, verify_otp, get_user_email,
     resolve_guest_user, compute_session_totals, GUEST_COOKIE_VALUE, GUEST_STORAGE_KEY,
+    now_wib,
 )
 from hashlib import sha256
 from decouple import config
-import pickle
 import time
 import json
 from datetime import datetime
@@ -37,21 +37,23 @@ EMAIL_PASSWORD = config('EMAIL_PASSWORD')
 # Berapa detik kamera harus benar-benar mati sebelum sesi dianggap selesai.
 CAMERA_OFF_GRACE = 3.0
 
-# ── Cookie helper ─────────────────────────────────────────────────────────────
+# ── Sesi login ────────────────────────────────────────────────────────────────
+# PENTING: dulu ini disimpan lewat file cookies.pkl di server — itu BUKAN
+# cookie per-browser, itu satu file GLOBAL yang dipakai bersama oleh SEMUA
+# pengunjung. Siapa pun yang login akan menimpa file itu, dan pengunjung lain
+# yang membuka app yang sama otomatis "ikut login" sebagai orang terakhir yang
+# menimpanya — bug keamanan serius di deployment multi-pengguna (Streamlit
+# Cloud). st.session_state benar-benar terpisah per koneksi browser/tab,
+# jadi login satu orang tidak lagi bisa bocor ke orang lain.
 def set_cookie(username):
-    cookies = {"username": username, "expiry": time.time() + 60 * 60 * 24 * 30}
-    pickle.dump(cookies, open("cookies.pkl", "wb"))
+    st.session_state["auth_user"] = username
 
 def get_cookie():
-    if os.path.exists("cookies.pkl"):
-        cookies = pickle.load(open("cookies.pkl", "rb"))
-        if cookies["expiry"] > time.time():
-            return cookies["username"]
-    return None
+    return st.session_state.get("auth_user") or None
 
 def save_guest_session(session_id, start_time_str, events):
     """Simpan satu sesi tamu ke localStorage browser (maksimal 10 sesi terbaru)."""
-    end_time_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    end_time_str = now_wib().strftime('%Y-%m-%d %H:%M:%S')
     try:
         start_dt = datetime.strptime(start_time_str, '%Y-%m-%d %H:%M:%S')
         end_dt   = datetime.strptime(end_time_str, '%Y-%m-%d %H:%M:%S')
@@ -521,8 +523,16 @@ if logged_in:
             play_alarm = shared_state["play_alarm"]
         return audio_handler.process(frame, play_sound=play_alarm)
 
+    # Key dibuat dinamis (bukan string tetap) — setelah sebuah sesi berakhir,
+    # angkanya dinaikkan (lihat blok auto-stop di bawah) supaya START berikutnya
+    # memasang instance komponen webrtc yang benar-benar baru, bukan memakai
+    # ulang koneksi lama yang kadang macet nyambung lagi (video cuma muter
+    # loading terus) setelah STOP lalu START cepat-cepat.
+    if "webrtc_key_suffix" not in st.session_state:
+        st.session_state["webrtc_key_suffix"] = 0
+
     ctx = webrtc_streamer(
-        key="drowsiness-detection",
+        key=f"drowsiness-detection-{st.session_state['webrtc_key_suffix']}",
         video_frame_callback=video_frame_callback,
         audio_frame_callback=audio_frame_callback,
         rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]},
@@ -558,7 +568,7 @@ if logged_in:
         # Kamera baru nyala → mulai sesi otomatis
         if is_guest:
             sid = f"g_{int(time.time() * 1000)}"
-            st.session_state["guest_session_start"] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            st.session_state["guest_session_start"] = now_wib().strftime('%Y-%m-%d %H:%M:%S')
         else:
             sid = start_session(user)
         st.session_state["session_id"]    = sid
@@ -581,8 +591,10 @@ if logged_in:
             st.session_state["is_monitoring"] = False
             st.session_state["session_id"]    = None
             st.session_state["camera_off_since"] = None
+            st.session_state["webrtc_key_suffix"] += 1
             video_handler.pending_events.clear()
             st.success(f"Sesi tersimpan! {total} kejadian kantuk tercatat.")
+            st.experimental_rerun()
 
     # ── Info status ───────────────────────────────────────────────────────────
     # Rerun berkala selama kamera/sesi hidup: event kantuk masuk dari thread
