@@ -1,4 +1,5 @@
 import sqlite3
+import secrets
 from datetime import datetime, timedelta, timezone
 
 
@@ -15,6 +16,13 @@ def now_wib():
 # tetap "nyantol" walau tab di-refresh atau dibuka ulang.
 GUEST_COOKIE_VALUE = "__guest__"
 GUEST_STORAGE_KEY = "drowsiness_guest_sessions"
+
+# Key localStorage tempat token "ingat saya" disimpan di browser masing-masing
+# pengunjung (lihat set_session_token/get_username_by_token). Ini BUKAN
+# cookies.pkl versi baru — localStorage bawaannya sudah per-browser/per-origin,
+# tidak pernah dibagi antar pengunjung, dan isinya cuma token acak yang harus
+# cocok dengan DB, bukan username mentah yang bisa dipalsukan lewat DevTools.
+AUTH_STORAGE_KEY = "drowsiness_auth_token"
 
 def resolve_guest_user(cookie_value):
     """Dari nilai cookie mentah, kembalikan (user, is_guest)."""
@@ -38,12 +46,19 @@ def create_db():
 
     cursor.execute('''
     CREATE TABLE IF NOT EXISTS users (
-        id       INTEGER PRIMARY KEY AUTOINCREMENT,
-        username TEXT    UNIQUE NOT NULL,
-        email    TEXT    NOT NULL,
-        password TEXT    NOT NULL
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        username      TEXT    UNIQUE NOT NULL,
+        email         TEXT    NOT NULL,
+        password      TEXT    NOT NULL,
+        session_token TEXT
     )
     ''')
+    # Migrasi buat DB lama yang tabel users-nya sudah ada tanpa kolom ini —
+    # SQLite tidak punya "ADD COLUMN IF NOT EXISTS", jadi ditangkap errornya saja.
+    try:
+        cursor.execute('ALTER TABLE users ADD COLUMN session_token TEXT')
+    except sqlite3.OperationalError:
+        pass
 
     # Satu baris = satu sesi berkendara (Start → Stop)
     cursor.execute('''
@@ -185,6 +200,47 @@ def get_user_email(username):
     result = cursor.fetchone()
     conn.close()
     return result[0] if result else None
+
+
+# ─── Token "ingat saya" (persist login lewat localStorage, BUKAN cookies.pkl) ──
+# Satu token per akun (bukan per-device) — simpel & cukup untuk skala thesis
+# ini. Konsekuensinya: login di browser/device baru akan membuat token lama
+# di device lain berhenti berlaku (bukan bug keamanan, cuma harus login ulang).
+
+def set_session_token(username):
+    """Buat token acak baru, simpan di DB untuk akun ini, kembalikan tokennya
+    supaya bisa didorong ke localStorage browser yang bersangkutan."""
+    token = secrets.token_hex(32)
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute('UPDATE users SET session_token=? WHERE username=?', (token, username))
+    conn.commit()
+    conn.close()
+    return token
+
+def get_username_by_token(token):
+    """Cari pemilik token — dipakai untuk memulihkan login dari localStorage.
+    Token acak & tersimpan di DB, jadi tidak bisa dipalsukan cuma dengan
+    menebak/mengetik username di localStorage lewat DevTools."""
+    if not token:
+        return None
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute('SELECT username FROM users WHERE session_token=?', (token,))
+    result = cursor.fetchone()
+    conn.close()
+    return result[0] if result else None
+
+def clear_session_token(username):
+    """Cabut token saat logout, supaya localStorage lama (kalau tidak sempat
+    terhapus di browser) tidak bisa dipakai untuk login lagi."""
+    if not username:
+        return
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute('UPDATE users SET session_token=NULL WHERE username=?', (username,))
+    conn.commit()
+    conn.close()
 
 
 # ─── Sessions ─────────────────────────────────────────────────────────────────
