@@ -399,24 +399,40 @@ if logged_in:
     display_name = user or "Tamu"
     alarm_file_path = os.path.join("audio", "wake_up.wav")
 
-    # GPS realtime
-    components.html("""
-    <script>
-    if (navigator.geolocation) {
-        navigator.geolocation.watchPosition(
-            function(pos) {
-                const lat = pos.coords.latitude;
-                const lon = pos.coords.longitude;
-                const link = "https://www.google.com/maps?q=" + lat + "," + lon;
-                const newUrl = window.parent.location.href.split("?")[0] + "?loc=" + encodeURIComponent(link);
-                window.parent.history.replaceState(null, "", newUrl);
-            },
-            function(err) { console.error("Gagal ambil lokasi:", err); },
-            { enableHighAccuracy: true, maximumAge: 0 }
-        );
-    }
-    </script>
-    """, height=0)
+    # Tentukan lebih dulu apakah ada email tujuan alarm — dipakai untuk
+    # video_handler.email_recipients di bawah, DAN untuk memutuskan perlu
+    # tidaknya minta izin lokasi (lokasi cuma dipakai di body email alarm,
+    # jadi tamu / akun tanpa email terdaftar tidak perlu ditanya lokasi).
+    if is_guest:
+        recipient_emails = []
+    else:
+        # Cache per user, bukan query DB tiap rerun — halaman ini di-autorefresh
+        # tiap 1 detik selama monitoring aktif.
+        if st.session_state.get("email_recipient_for") != user:
+            st.session_state["email_recipient_for"] = user
+            recipient_email = get_user_email(user)
+            st.session_state["email_recipient_cached"] = [recipient_email] if recipient_email else []
+        recipient_emails = st.session_state["email_recipient_cached"]
+
+    # GPS realtime — cuma diminta kalau memang ada tujuan emailnya
+    if recipient_emails:
+        components.html("""
+        <script>
+        if (navigator.geolocation) {
+            navigator.geolocation.watchPosition(
+                function(pos) {
+                    const lat = pos.coords.latitude;
+                    const lon = pos.coords.longitude;
+                    const link = "https://www.google.com/maps?q=" + lat + "," + lon;
+                    const newUrl = window.parent.location.href.split("?")[0] + "?loc=" + encodeURIComponent(link);
+                    window.parent.history.replaceState(null, "", newUrl);
+                },
+                function(err) { console.error("Gagal ambil lokasi:", err); },
+                { enableHighAccuracy: true, maximumAge: 0 }
+            );
+        }
+        </script>
+        """, height=0)
 
     # Cegah layar mati saat deteksi berjalan
     components.html("""
@@ -488,16 +504,7 @@ if logged_in:
     if "video_handler" not in st.session_state: st.session_state["video_handler"] = VideoFrameHandler()
 
     video_handler = st.session_state["video_handler"]
-    if is_guest:
-        video_handler.email_recipients = []
-    else:
-        # Cache per user, bukan query DB tiap rerun — halaman ini di-autorefresh
-        # tiap 1 detik selama monitoring aktif.
-        if st.session_state.get("email_recipient_for") != user:
-            st.session_state["email_recipient_for"] = user
-            recipient_email = get_user_email(user)
-            st.session_state["email_recipient_cached"] = [recipient_email] if recipient_email else []
-        video_handler.email_recipients = st.session_state["email_recipient_cached"]
+    video_handler.email_recipients = recipient_emails
     audio_handler = AudioFrameHandler(sound_file_path=alarm_file_path)
     lock = threading.Lock()
     shared_state = {"play_alarm": False}
