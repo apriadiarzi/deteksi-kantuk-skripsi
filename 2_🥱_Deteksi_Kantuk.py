@@ -910,25 +910,52 @@ else:
                 otp_input = st.text_input("Masukkan Kode OTP", placeholder="6 digit kode dari email",
                                           max_chars=6, key="otp_input")
 
+                verifying = st.session_state.get('verifying_otp', False)
+
                 st.markdown('<div class="btn-primary-marker"></div>', unsafe_allow_html=True)
-                if st.button("Verifikasi & Buat Akun", key="verify_otp_btn"):
-                    if not otp_input:
-                        st.error("Masukkan kode OTP terlebih dahulu.")
+                if verifying:
+                    st.button("Memverifikasi...", disabled=True, key="verify_otp_btn_busy")
+                elif st.button("Verifikasi & Buat Akun", key="verify_otp_btn"):
+                    # Kerja beratnya ditunda ke render berikutnya supaya tombol
+                    # sempat berubah jadi "Memverifikasi..." dan terkunci —
+                    # tanpa ini user tidak dapat umpan balik apa pun dan
+                    # cenderung nge-spam tombolnya.
+                    if not otp_input.strip():
+                        st.session_state['otp_error'] = "Masukkan kode OTP terlebih dahulu."
                     else:
-                        valid, msg = verify_otp(st.session_state['reg_username'], otp_input)
-                        if valid:
-                            set_cookie(st.session_state['reg_username'])
-                            st.success("Akun berhasil dibuat! Selamat datang 🎉")
-                            st.experimental_rerun()
-                        else:
-                            st.error(msg)
+                        st.session_state['verifying_otp'] = True
+                    st.experimental_rerun()
+
+                if verifying:
+                    with st.spinner("Memverifikasi kode..."):
+                        try:
+                            valid, msg = verify_otp(
+                                st.session_state['reg_username'],
+                                st.session_state.get('otp_input', '').strip(),
+                            )
+                        except Exception as e:
+                            print(f"Verifikasi OTP gagal: {e}")
+                            valid, msg = False, "Gagal menghubungi server. Periksa koneksi internet kamu lalu coba lagi."
+                    st.session_state['verifying_otp'] = False
+                    if valid:
+                        set_cookie(st.session_state['reg_username'])
+                    else:
+                        st.session_state['otp_error'] = msg
+                    st.experimental_rerun()
+
+                if st.session_state.get('otp_error'):
+                    st.error(st.session_state.pop('otp_error'))
 
                 # Tombol kirim ulang, kanan bawah, kena cooldown 30 detik
                 remaining = int(30 - (time.time() - st.session_state.get('otp_last_sent', 0)))
-                # Auto-refresh tiap detik biar angkanya jalan — jeda kalau lagi ngetik OTP
-                # key & limit tetap per siklus kirim, biar hitungan internal komponennya ga ke-lap
-                if remaining > 0 and not otp_input:
-                    st_autorefresh(interval=1000, limit=35, key=f"resend_countdown_{st.session_state['otp_last_sent']}")
+                # Dulu di-refresh tiap 1 detik dan itu merusak layar ini di HP:
+                # tiap rerun menelan tap tombol Verifikasi dan mengganggu
+                # pengetikan kode (di HP nilai field baru sampai ke server
+                # setelah field kehilangan fokus, jadi syarat `not otp_input`
+                # tidak menolong). Angkanya cuma kosmetik, jadi jedanya
+                # diperlonggar dan dimatikan total selama verifikasi berjalan.
+                if remaining > 0 and not otp_input and not verifying:
+                    st_autorefresh(interval=3000, limit=12, key=f"resend_countdown_{st.session_state['otp_last_sent']}")
                 if remaining > 0:
                     st.markdown(f'<p style="text-align:right; font-size:0.8rem; color:var(--muted);">Kirim ulang ({remaining}s)</p>', unsafe_allow_html=True)
                 else:
