@@ -4,6 +4,7 @@ import av
 import random
 import string
 import threading
+import traceback
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -613,11 +614,21 @@ if logged_in:
     shared_state = {"play_alarm": False}
 
     def video_frame_callback(frame: av.VideoFrame):
-        frame = frame.to_ndarray(format="bgr24")
-        frame, play_alarm = video_handler.process(frame, thresholds)
-        with lock:
-            shared_state["play_alarm"] = play_alarm
-        return av.VideoFrame.from_ndarray(frame, format="bgr24")
+        try:
+            img = frame.to_ndarray(format="bgr24")
+            img, play_alarm = video_handler.process(img, thresholds)
+            with lock:
+                shared_state["play_alarm"] = play_alarm
+            return av.VideoFrame.from_ndarray(img, format="bgr24")
+        except Exception:
+            # Callback ini jalan di thread kamera. Kalau error-nya dibiarkan
+            # lolos, aiortc menelannya diam-diam: frame berhenti dikirim,
+            # video jadi kosong, dan tidak ada pesan apa pun di layar. Jejaknya
+            # disimpan di video_handler supaya bisa ditampilkan dari main
+            # thread, dan frame aslinya tetap dikembalikan supaya koneksinya
+            # tidak ikut mati.
+            video_handler.last_error = traceback.format_exc()
+            return frame
 
     def audio_frame_callback(frame: av.AudioFrame):
         with lock:
@@ -738,6 +749,19 @@ if logged_in:
         )
     elif not camera_active:
         st.caption("Tekan START pada kamera untuk memulai sesi monitoring.")
+
+    # Error dari thread kamera — lihat catatan di video_frame_callback.
+    if getattr(video_handler, "last_error", None):
+        st.error("Error saat memproses frame kamera:")
+        st.code(video_handler.last_error)
+
+    # DIAGNOSTIK SEMENTARA — buat melacak kenapa koneksi kamera putus sendiri
+    # di Streamlit Cloud. Hapus kalau sudah ketemu penyebabnya.
+    st.caption(
+        f"diagnostik · playing={cam_playing} · signalling={cam_signalling} · "
+        f"mati_selama={camera_off_for:.1f}s · monitoring={st.session_state['is_monitoring']} · "
+        f"key={st.session_state['webrtc_key_suffix']}"
+    )
 
 # ══════════════════════════════════════════════════════════════════════════════
 # BELUM LOGIN
