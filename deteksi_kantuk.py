@@ -8,22 +8,10 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from decouple import config
 import requests
-import os
-import pickle
 import threading
 from datetime import datetime
+from database import now_wib
 # database di-handle dari Streamlit saat Stop
-
-
-def get_cookie():
-    if os.path.exists("cookies.pkl"):
-        cookies = pickle.load(open("cookies.pkl", "rb"))
-        if cookies["expiry"] > time.time():
-            return cookies["username"]
-    return None
-
-user = get_cookie()
-print(user)
 
 # ── Cache lokasi dari browser ─────────────────────────────────────────────────
 _location_cache = {"maps_link": "Lokasi tidak tersedia"}
@@ -317,7 +305,7 @@ class VideoFrameHandler:
             # ── Logika EAR ────────────────────────────────────────────────────
             if EAR < thresholds["EAR_THRESH"]:
                 if self._eye_event_start is None:
-                    self._eye_event_start = datetime.now()
+                    self._eye_event_start = now_wib()
                 end_time = time.perf_counter()
                 self.state_tracker["DROWSY_TIME"] += end_time - self.state_tracker["start_time"]
                 self.state_tracker["start_time"]   = end_time
@@ -359,7 +347,7 @@ class VideoFrameHandler:
             # ── Logika MAR ────────────────────────────────────────────────────
             if MAR > thresholds["MAR_THRESH"]:
                 if self._yawn_event_start is None:
-                    self._yawn_event_start = datetime.now()
+                    self._yawn_event_start = now_wib()
                 yawn_end = time.perf_counter()
                 self.state_tracker["YAWN_TIME"]       += yawn_end - self.state_tracker["YAWN_start_time"]
                 self.state_tracker["YAWN_start_time"]  = yawn_end
@@ -398,7 +386,7 @@ class VideoFrameHandler:
             # ── Logika Head Tilt ──────────────────────────────────────────────
             if abs_angle > thresholds["TILT_THRESH"]:
                 if self._tilt_event_start is None:
-                    self._tilt_event_start = datetime.now()
+                    self._tilt_event_start = now_wib()
                 tilt_end = time.perf_counter()
                 self.state_tracker["TILT_TIME"]       += tilt_end - self.state_tracker["TILT_start_time"]
                 self.state_tracker["TILT_start_time"]  = tilt_end

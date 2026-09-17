@@ -1,7 +1,4 @@
 import streamlit as st
-import os
-import pickle
-import time
 import json
 from datetime import datetime, date
 from urllib.parse import unquote
@@ -122,6 +119,13 @@ h1, h2, h3 { font-family: 'Space Grotesk', sans-serif; }
 [data-testid="stSelectbox"] div[data-baseweb="select"] { cursor: pointer; }
 [data-testid="stDateInput"] div[data-baseweb="base-input"] { cursor: pointer; }
 
+/* Emoji "kepala miring" — tidak ada emoji unicode utuh untuk itu, jadi pakai
+   yang sudah ada (😵) tapi dimiringkan manual lewat transform. Cuma bisa
+   diterapkan di tempat yang HTML-nya saya kontrol langsung (daftar rincian
+   kejadian) — di label checkbox Streamlit tidak menerima HTML sama sekali,
+   jadi di situ emoji-nya polos saja tanpa rotasi. */
+.tilt-icon { display: inline-block; transform: rotate(45deg); }
+
 /* Identitas sidebar dijadikan satu blok, supaya jaraknya tidak melebar
    karena gap antar-elemen bawaan Streamlit. */
 .side-user {
@@ -155,16 +159,13 @@ h1, h2, h3 { font-family: 'Space Grotesk', sans-serif; }
 """, unsafe_allow_html=True)
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+# st.session_state, bukan file di server — lihat catatan di 2_🥱_Deteksi_Kantuk.py
+# soal kenapa cookies.pkl (file global di server) adalah bug keamanan serius.
 def set_cookie(username):
-    cookies = {"username": username, "expiry": 0}
-    pickle.dump(cookies, open("cookies.pkl", "wb"))
+    st.session_state["auth_user"] = username
 
 def get_cookie():
-    if os.path.exists("cookies.pkl"):
-        cookies = pickle.load(open("cookies.pkl", "rb"))
-        if cookies["expiry"] > time.time():
-            return cookies["username"]
-    return None
+    return st.session_state.get("auth_user") or None
 
 def fmt_dur(seconds):
     if seconds is None: return "-"
@@ -175,7 +176,11 @@ def fmt_dur(seconds):
     if m > 0: return f"{m}m {s}d"
     return f"{s} detik"
 
-EVENT_LABEL = {"eye_close": "😴 Mata Tertutup", "yawn": "🥱 Menguap", "head_tilt": "😵 Kepala Miring"}
+EVENT_LABEL = {
+    "eye_close": "😴 Mata Tertutup",
+    "yawn": "🥱 Menguap",
+    "head_tilt": '<span class="tilt-icon">😵</span> Kepala Miring',
+}
 EVENT_COLOR = {"eye_close": "var(--primary)", "yawn": "var(--accent)", "head_tilt": "var(--accent-bright)"}
 
 # ── Auth ──────────────────────────────────────────────────────────────────────
