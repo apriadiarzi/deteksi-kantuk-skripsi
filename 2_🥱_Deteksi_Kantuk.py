@@ -36,7 +36,11 @@ EMAIL_SENDER   = "deteksikantuk@gmail.com"
 EMAIL_PASSWORD = config('EMAIL_PASSWORD')
 
 # Berapa detik kamera harus benar-benar mati sebelum sesi dianggap selesai.
-CAMERA_OFF_GRACE = 0.7
+# Jangan dibikin terlalu pendek: kalau koneksi WebRTC sempat goyang sebentar,
+# sesi keburu dianggap selesai dan komponen kameranya di-remount (lihat
+# webrtc_key_suffix) — dari sisi user kelihatannya kayak halaman kerefresh
+# sendiri dan harus klik START lagi.
+CAMERA_OFF_GRACE = 1.5
 
 # ── Sesi login ────────────────────────────────────────────────────────────────
 # PENTING: dulu ini disimpan lewat file cookies.pkl di server — itu BUKAN
