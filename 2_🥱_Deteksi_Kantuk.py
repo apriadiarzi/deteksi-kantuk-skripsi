@@ -449,10 +449,22 @@ if needs_auth_restore:
     if "authtok" in query_params:
         token = query_params["authtok"][0]
         st.session_state["auth_restore_done"] = True
+        # DIAGNOSTIK SEMENTARA — tokennya tidak pernah ditampilkan utuh, cuma
+        # bentuknya, karena itu kredensial. Hapus kalau sudah ketemu masalahnya.
+        if not token or token == "-":
+            st.session_state["auth_restore_debug"] = "localStorage KOSONG (token tidak pernah tersimpan di browser)"
+        elif token == GUEST_COOKIE_VALUE:
+            st.session_state["auth_restore_debug"] = "localStorage berisi penanda TAMU"
+        else:
+            st.session_state["auth_restore_debug"] = f"localStorage berisi token ({len(token)} karakter, diawali {token[:6]}…)"
         if token == GUEST_COOKIE_VALUE:
             st.session_state["auth_user"] = GUEST_COOKIE_VALUE
         elif token and token != "-":
             restored_username = get_username_by_token(token)
+            st.session_state["auth_restore_debug"] += (
+                f" → cocok dengan akun '{restored_username}'" if restored_username
+                else " → TIDAK ADA akun dengan token ini di database"
+            )
             if restored_username:
                 st.session_state["auth_user"] = restored_username
             else:
@@ -776,6 +788,9 @@ else:
 
     if 'page' not in st.session_state:
         st.session_state['page'] = 'daftar'
+
+    # DIAGNOSTIK SEMENTARA — kenapa sesi login tidak ikut pulih setelah refresh.
+    st.caption(f"diagnostik pulihkan-login · {st.session_state.get('auth_restore_debug', 'blok pemulihan tidak pernah jalan')}")
 
     # ── MASUK ─────────────────────────────────────────────────────────────────
     if st.session_state['page'] == 'masuk':
