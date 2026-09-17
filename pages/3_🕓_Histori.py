@@ -125,7 +125,7 @@ h1, h2, h3 { font-family: 'Space Grotesk', sans-serif; }
    diterapkan di tempat yang HTML-nya saya kontrol langsung (daftar rincian
    kejadian) — di label checkbox Streamlit tidak menerima HTML sama sekali,
    jadi di situ emoji-nya polos saja tanpa rotasi. */
-.tilt-icon { display: inline-block; transform: rotate(45deg); }
+.tilt-icon { display: inline-block; transform: rotate(15deg); }
 
 /* Identitas sidebar dijadikan satu blok, supaya jaraknya tidak melebar
    karena gap antar-elemen bawaan Streamlit. */
