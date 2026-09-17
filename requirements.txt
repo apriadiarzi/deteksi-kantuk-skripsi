@@ -1,7 +1,20 @@
-cryptography==38.0.0
+# Catatan versi (penting untuk deploy di Streamlit Cloud):
+# - av 14.x tidak punya wheel siap pakai di PyPI, jadi pip mencoba compile
+#   dari source dan gagal (butuh ffmpeg 7 + compiler). av 13.1.0 punya wheel
+#   lengkap untuk Python 3.10-3.13.
+# - aiortc >= 1.11 mewajibkan av >= 14, jadi ditahan di 1.10.1 yang masih
+#   menerima av 13.x. Versi ini butuh cryptography >= 42, sehingga pin lama
+#   cryptography==38.0.0 dilepas.
+# - mediapipe >= 0.10.13 butuh protobuf >= 4.25.3, bentrok dengan
+#   streamlit 1.17.0 yang butuh protobuf < 4.
+cryptography
 pyOpenSSL
-aiortc
-numpy
+aiortc==1.10.1
+av==13.1.0
+# mediapipe 0.10.x dikompilasi untuk numpy 1.x dan opencv 4.x; kalau pip bebas
+# memilih, dia ambil numpy 2.x / opencv 5.x dan mediapipe gagal saat import.
+numpy<2
+opencv-contrib-python<5
 pydub
 mediapipe==0.10.11
 streamlit==1.17.0
@@ -11,5 +24,3 @@ streamlit-autorefresh
 altair==4.0
 requests
 python-decouple
-passlib
-streamlit-authenticator
