@@ -36,14 +36,30 @@ def _db(commit=False):
     """
     global _conn
     with _conn_lock:
+        cursor = None
         for attempt in (1, 2):
             try:
-                if _conn is None or _conn.closed:
+                baru = _conn is None or _conn.closed
+                if baru:
                     _conn = psycopg2.connect(DATABASE_URL)
                 cursor = _conn.cursor()
+                if not baru:
+                    # Koneksi lama belum tentu masih hidup. Neon menidurkan
+                    # database saat menganggur dan socket-nya mati tanpa
+                    # mengubah nilai `closed`, sementara `.cursor()` tidak
+                    # menyentuh jaringan sama sekali sehingga selalu lolos.
+                    # Tanpa ping ini, kegagalan baru muncul saat execute() —
+                    # yaitu di luar blok retry, jadi langsung melempar error.
+                    cursor.execute('SELECT 1')
                 break
             except (psycopg2.OperationalError, psycopg2.InterfaceError):
+                try:
+                    if _conn is not None:
+                        _conn.close()
+                except Exception:
+                    pass
                 _conn = None
+                cursor = None
                 if attempt == 2:
                     raise
         try:
