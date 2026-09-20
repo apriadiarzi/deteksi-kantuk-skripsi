@@ -559,10 +559,21 @@ if logged_in:
         # Cache per user, bukan query DB tiap rerun — halaman ini di-autorefresh
         # tiap 1 detik selama monitoring aktif.
         if st.session_state.get("email_recipient_for") != user:
-            st.session_state["email_recipient_for"] = user
-            recipient_email = get_user_email(user)
+            try:
+                recipient_email = get_user_email(user)
+            except Exception as e:
+                # Email tujuan alarm itu fitur tambahan — kalau database lagi
+                # bermasalah, jangan sampai seluruh halaman ikut mati. Cukup
+                # jalan tanpa notifikasi email, dan dicoba lagi di rerun berikutnya.
+                print(f"Gagal ambil email penerima: {e}")
+                recipient_email = None
+            else:
+                # Penanda BARU disetel setelah query benar-benar berhasil.
+                # Kalau disetel lebih dulu lalu query gagal, rerun berikutnya
+                # akan melewati blok ini dan membaca cache yang tak pernah terisi.
+                st.session_state["email_recipient_for"] = user
             st.session_state["email_recipient_cached"] = [recipient_email] if recipient_email else []
-        recipient_emails = st.session_state["email_recipient_cached"]
+        recipient_emails = st.session_state.get("email_recipient_cached", [])
 
     # GPS realtime — cuma diminta kalau memang ada tujuan emailnya
     if recipient_emails:
