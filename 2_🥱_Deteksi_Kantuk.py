@@ -774,6 +774,28 @@ if logged_in:
     if getattr(video_handler, "last_error", None):
         st.warning("Ada gangguan saat memproses frame kamera. Detailnya tercatat di log aplikasi.")
 
+    # DIAGNOSTIK SEMENTARA — memisahkan dua penyebab yang gejalanya mirip di HP:
+    # kamera ditolak browser (izin/secure context) vs koneksi WebRTC tidak
+    # terbentuk. Hapus setelah ketemu penyebabnya.
+    st.caption(f"server · playing={cam_playing} · signalling={cam_signalling}")
+    # Sengaja TIDAK memanggil getUserMedia: itu akan merebut kamera dari
+    # komponen WebRTC (di HP kamera biasanya cuma bisa dipakai satu pemakai),
+    # jadi diagnostiknya sendiri yang akan merusak hal yang sedang diperiksa.
+    components.html("""
+    <div id="d" style="font:12px system-ui;color:#9FB3C8">memeriksa browser...</div>
+    <script>
+    const d = document.getElementById('d');
+    const p = ['https=' + window.isSecureContext,
+               'mediaDevices=' + (navigator.mediaDevices ? 'ada' : 'TIDAK ADA')];
+    const show = x => { d.textContent = 'browser · ' + p.concat([x]).join(' · '); };
+    if (navigator.permissions && navigator.permissions.query) {
+        navigator.permissions.query({name: 'camera'})
+            .then(r => show('izin=' + r.state))
+            .catch(() => show('izin=tidak bisa dicek'));
+    } else { show('izin=tidak didukung browser ini'); }
+    </script>
+    """, height=40)
+
 # ══════════════════════════════════════════════════════════════════════════════
 # BELUM LOGIN
 # ══════════════════════════════════════════════════════════════════════════════
