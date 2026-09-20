@@ -1,16 +1,23 @@
 # Catatan versi (penting untuk deploy di Streamlit Cloud):
 # - av 14.x tidak punya wheel siap pakai di PyPI, jadi pip mencoba compile
-#   dari source dan gagal (butuh ffmpeg 7 + compiler). av 13.1.0 punya wheel
-#   lengkap untuk Python 3.10-3.13.
-# - aiortc >= 1.11 mewajibkan av >= 14, jadi ditahan di 1.10.1 yang masih
-#   menerima av 13.x. Versi ini butuh cryptography >= 42, sehingga pin lama
-#   cryptography==38.0.0 dilepas.
+#   dari source dan gagal (butuh ffmpeg 7 + compiler).
+# - aiortc dipin ke 1.9.0 (bukan 1.10.1) — versi lebih baru terbukti gagal
+#   nyambung ICE lewat internet sungguhan (STUN-only) di Streamlit Cloud,
+#   walau kode & konfigurasinya identik dan lolos tes di localhost. Repo
+#   referensi tutorial (veb-101/Drowsiness-Detection-Using-Mediapipe-Streamlit,
+#   terbukti jalan di Streamlit Cloud pakai rtc_configuration STUN-only yang
+#   sama) memakai aiortc versi ~2024, jauh lebih dekat ke 1.9 daripada 1.10+.
+#   1.9.0 adalah versi terlama yang masih bisa dipasang cloud (butuh av<13,
+#   dan av<13 baru tersedia wheel-nya mulai 12.x — av<12 harus compile dari
+#   source dan gagal).
+# - aiortc 1.9.0 butuh cryptography>=42.0.0 dan pyOpenSSL>=24.0.0, sehingga
+#   pin lama cryptography==38.0.0 dilepas.
 # - mediapipe >= 0.10.13 butuh protobuf >= 4.25.3, bentrok dengan
 #   streamlit 1.17.0 yang butuh protobuf < 4.
 cryptography
 pyOpenSSL
-aiortc==1.10.1
-av==13.1.0
+aiortc==1.9.0
+av==12.3.0
 # mediapipe 0.10.x dikompilasi untuk numpy 1.x dan opencv 4.x; kalau pip bebas
 # memilih, dia ambil numpy 2.x / opencv 5.x dan mediapipe gagal saat import.
 numpy<2
