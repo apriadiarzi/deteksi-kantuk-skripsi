@@ -674,10 +674,22 @@ if logged_in:
 
     def video_frame_callback(frame: av.VideoFrame):
         try:
+            t0 = time.perf_counter()
             img = frame.to_ndarray(format="bgr24")
             img, play_alarm = video_handler.process(img, thresholds)
             with lock:
                 shared_state["play_alarm"] = play_alarm
+            # DIAGNOSTIK SEMENTARA — mengukur berapa lama process() (CLAHE +
+            # MediaPipe) benar-benar makan waktu di CPU cloud yang sebenarnya.
+            # Kalau ini mendekati/melebihi jarak antar frame (misal ~33ms utk
+            # 30fps), frame menumpuk dan bisa memicu koneksi WebRTC diputus.
+            elapsed_ms = (time.perf_counter() - t0) * 1000
+            with lock:
+                shared_state["last_frame_ms"] = elapsed_ms
+                times = shared_state.setdefault("frame_times", [])
+                times.append(elapsed_ms)
+                if len(times) > 30:
+                    times.pop(0)
             return av.VideoFrame.from_ndarray(img, format="bgr24")
         except Exception:
             # Callback ini jalan di thread kamera. Kalau error-nya dibiarkan
@@ -789,6 +801,18 @@ if logged_in:
     # kamera ditolak browser (izin/secure context) vs koneksi WebRTC tidak
     # terbentuk. Hapus setelah ketemu penyebabnya.
     st.caption(f"server · playing={cam_playing} · signalling={cam_signalling}")
+
+    # DIAGNOSTIK SEMENTARA — berapa lama process() (CLAHE+MediaPipe) beneran
+    # makan waktu di CPU cloud. Kalau mendekati/lewat jarak antar frame,
+    # frame menumpuk dan bisa jadi penyebab koneksi diputus setelah beberapa
+    # detik jalan. Hapus setelah ketemu penyebabnya.
+    with lock:
+        frame_times = list(shared_state.get("frame_times", []))
+    if frame_times:
+        st.caption(
+            f"proses frame · rata2={sum(frame_times)/len(frame_times):.0f}ms · "
+            f"maks={max(frame_times):.0f}ms · sampel={len(frame_times)}"
+        )
     # Sengaja TIDAK memanggil getUserMedia: itu akan merebut kamera dari
     # komponen WebRTC (di HP kamera biasanya cuma bisa dipakai satu pemakai),
     # jadi diagnostiknya sendiri yang akan merusak hal yang sedang diperiksa.
