@@ -58,6 +58,23 @@ METERED_API_KEY  = config('METERED_API_KEY', default='')
 
 STUN_ONLY = [{"urls": ["stun:stun.l.google.com:19302"]}]
 
+# Jaring pengaman kalau API Metered lagi tidak bisa dihubungi: TURN publik
+# gratis dari Open Relay Project (kredensialnya memang statis dan terbuka untuk
+# umum, jadi tidak masalah ada di dalam git). Ini SEKADAR cadangan — tidak ada
+# jaminan uptime maupun kapasitas, jadi jangan diandalkan untuk sidang/demo.
+# Yang diandalkan tetap kredensial Metered milik sendiri di bawah.
+OPEN_RELAY_FALLBACK = STUN_ONLY + [
+    {
+        "urls": [
+            "turn:openrelay.metered.ca:80",
+            "turn:openrelay.metered.ca:443",
+            "turns:openrelay.metered.ca:443?transport=tcp",
+        ],
+        "username": "openrelayproject",
+        "credential": "openrelayproject",
+    }
+]
+
 def build_ice_servers():
     """Ambil daftar server ICE (STUN + TURN) dari Metered.
 
@@ -65,6 +82,11 @@ def build_ice_servers():
     disimpan di Secrets cuma nama app + API key. Hasilnya di-cache karena
     halaman ini di-rerun tiap detik saat monitoring aktif — tidak perlu
     menembak API tiap rerun.
+
+    Kalau pengambilan kredensial gagal, hasil cadangannya IKUT di-cache (dengan
+    umur pendek). Tanpa itu, tiap rerun akan menembak API yang sedang bermasalah
+    lagi dan app-nya ikut menggantung sampai timeout — padahal saat monitoring
+    aktif rerun-nya tiap detik.
     """
     if not (METERED_APP_NAME and METERED_API_KEY):
         return STUN_ONLY
@@ -72,6 +94,10 @@ def build_ice_servers():
     cached = st.session_state.get("ice_servers_cache")
     if cached and time.time() < cached["expires"]:
         return cached["servers"]
+
+    def _cache(servers, ttl):
+        st.session_state["ice_servers_cache"] = {"servers": servers, "expires": time.time() + ttl}
+        return servers
 
     try:
         resp = requests.get(
@@ -81,14 +107,19 @@ def build_ice_servers():
         )
         resp.raise_for_status()
         servers = resp.json()
+        if not isinstance(servers, list) or not servers:
+            # API balas 200 tapi isinya bukan daftar server (mis. pesan error) —
+            # kalau diteruskan ke rtc_configuration, WebRTC-nya justru rusak.
+            raise ValueError(f"format respons tidak dikenal: {servers!r}")
     except Exception as e:
-        # Jangan sampai app mati cuma karena TURN tidak terjangkau — di lokal
-        # STUN saja memang sudah cukup.
-        print(f"Gagal ambil kredensial TURN: {e}")
-        return STUN_ONLY
+        # Jangan sampai app mati cuma karena TURN tidak terjangkau. Pakai TURN
+        # publik sebagai cadangan; di lokal STUN di dalamnya saja sudah cukup.
+        # TTL-nya sengaja pendek supaya kredensial Metered dicoba lagi sebentar
+        # kemudian begitu API-nya pulih.
+        print(f"Gagal ambil kredensial TURN: {e} — sementara pakai Open Relay")
+        return _cache(OPEN_RELAY_FALLBACK, 60)
 
-    st.session_state["ice_servers_cache"] = {"servers": servers, "expires": time.time() + 1800}
-    return servers
+    return _cache(servers, 1800)
 
 # ── Sesi login ────────────────────────────────────────────────────────────────
 # PENTING: dulu ini disimpan lewat file cookies.pkl di server — itu BUKAN
@@ -806,11 +837,6 @@ if logged_in:
     if getattr(video_handler, "last_error", None):
         st.warning("Ada gangguan saat memproses frame kamera. Detailnya tercatat di log aplikasi.")
 
-    # DIAGNOSTIK SEMENTARA — memisahkan dua penyebab yang gejalanya mirip di HP:
-    # kamera ditolak browser (izin/secure context) vs koneksi WebRTC tidak
-    # terbentuk. Hapus setelah ketemu penyebabnya.
-    st.caption(f"server · playing={cam_playing} · signalling={cam_signalling}")
-
     # DIAGNOSTIK SEMENTARA — berapa lama process() (CLAHE+MediaPipe) beneran
     # makan waktu di CPU cloud. Kalau mendekati/lewat jarak antar frame,
     # frame menumpuk dan bisa jadi penyebab koneksi diputus setelah beberapa
@@ -822,23 +848,6 @@ if logged_in:
             f"proses frame · rata2={sum(frame_times)/len(frame_times):.0f}ms · "
             f"maks={max(frame_times):.0f}ms · sampel={len(frame_times)}"
         )
-    # Sengaja TIDAK memanggil getUserMedia: itu akan merebut kamera dari
-    # komponen WebRTC (di HP kamera biasanya cuma bisa dipakai satu pemakai),
-    # jadi diagnostiknya sendiri yang akan merusak hal yang sedang diperiksa.
-    components.html("""
-    <div id="d" style="font:12px system-ui;color:#9FB3C8">memeriksa browser...</div>
-    <script>
-    const d = document.getElementById('d');
-    const p = ['https=' + window.isSecureContext,
-               'mediaDevices=' + (navigator.mediaDevices ? 'ada' : 'TIDAK ADA')];
-    const show = x => { d.textContent = 'browser · ' + p.concat([x]).join(' · '); };
-    if (navigator.permissions && navigator.permissions.query) {
-        navigator.permissions.query({name: 'camera'})
-            .then(r => show('izin=' + r.state))
-            .catch(() => show('izin=tidak bisa dicek'));
-    } else { show('izin=tidak didukung browser ini'); }
-    </script>
-    """, height=40)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # BELUM LOGIN
