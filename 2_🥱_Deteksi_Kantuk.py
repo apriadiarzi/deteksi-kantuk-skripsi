@@ -756,7 +756,16 @@ if logged_in:
         video_frame_callback=video_frame_callback,
         audio_frame_callback=audio_frame_callback,
         rtc_configuration={"iceServers": build_ice_servers()},
-        media_stream_constraints={"video": {"height": {"ideal": 480}}, "audio": True},
+        # 360p @ 15fps, bukan 480p pada fps bawaan (biasanya 30). Kejadian
+        # kantuk diukur dalam hitungan detik, jadi 15fps lebih dari cukup —
+        # sementara memangkas fps langsung memotong jumlah frame yang harus
+        # diproses CPU 1-core Streamlit Cloud, dan resolusi yang lebih kecil
+        # mempercepat konversi warna + CLAHE. Bonusnya: bandwidth TURN yang
+        # terpakai ikut turun banyak, jadi kuota Metered lebih awet.
+        media_stream_constraints={
+            "video": {"height": {"ideal": 360}, "frameRate": {"ideal": 15, "max": 20}},
+            "audio": True,
+        },
         video_html_attrs=VideoHTMLAttributes(
             autoPlay=True, controls=False, muted=False,
             style={"width": "100%", "height": "100%", "objectFit": "cover", "borderRadius": "10px"},
@@ -823,8 +832,14 @@ if logged_in:
     # kamera di background, dan transisi kamera nyala/mati tidak selalu memicu
     # rerun sendiri — tanpa ini status kamera baru kebaca saat ada interaksi
     # manual (itu sebabnya START seolah perlu dipencet dua kali).
+    # 2 detik, bukan 1 detik. Tiap rerun menjalankan ulang SELURUH script di
+    # core yang sama dengan thread pemroses frame, jadi di Streamlit Cloud itu
+    # langsung merebut CPU dari video. Masih jauh di bawah CAMERA_OFF_GRACE (3
+    # detik) sehingga deteksi kamera mati tetap jalan; konsekuensinya cuma
+    # mulai/berhentinya sesi ketahuan paling lambat 2 detik. Turunkan lagi ke
+    # 1000 kalau jeda itu terasa mengganggu.
     if st.session_state["is_monitoring"] or camera_active:
-        st_autorefresh(interval=1000, key="live_session_counter")
+        st_autorefresh(interval=2000, key="live_session_counter")
 
     if st.session_state["is_monitoring"]:
         st.markdown(
