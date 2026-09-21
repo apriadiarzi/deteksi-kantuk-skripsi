@@ -672,6 +672,17 @@ if logged_in:
     lock = threading.Lock()
     shared_state = {"play_alarm": False}
 
+    # DIAGNOSTIK SEMENTARA — disimpan di session_state (BUKAN variabel biasa
+    # seperti shared_state di atas), karena harus bertahan lintas rerun.
+    # shared_state dibuat ulang kosong tiap detik oleh st_autorefresh, jadi
+    # kode yang membacanya di render yang SAMA selalu melihatnya kosong —
+    # belum ada waktu berlalu untuk thread kamera sempat menulis apa pun ke
+    # situ sebelum baris pembacaannya jalan. video_handler sendiri sudah
+    # memakai pola session_state ini untuk alasan yang persis sama.
+    if "frame_timing" not in st.session_state:
+        st.session_state["frame_timing"] = []
+    frame_timing = st.session_state["frame_timing"]
+
     def video_frame_callback(frame: av.VideoFrame):
         try:
             t0 = time.perf_counter()
@@ -679,17 +690,15 @@ if logged_in:
             img, play_alarm = video_handler.process(img, thresholds)
             with lock:
                 shared_state["play_alarm"] = play_alarm
-            # DIAGNOSTIK SEMENTARA — mengukur berapa lama process() (CLAHE +
-            # MediaPipe) benar-benar makan waktu di CPU cloud yang sebenarnya.
-            # Kalau ini mendekati/melebihi jarak antar frame (misal ~33ms utk
-            # 30fps), frame menumpuk dan bisa memicu koneksi WebRTC diputus.
+            # Mengukur berapa lama process() (CLAHE + MediaPipe) benar-benar
+            # makan waktu di CPU cloud yang sebenarnya. Kalau ini mendekati/
+            # melebihi jarak antar frame (misal ~33ms utk 30fps), frame
+            # menumpuk dan bisa memicu koneksi WebRTC diputus.
             elapsed_ms = (time.perf_counter() - t0) * 1000
             with lock:
-                shared_state["last_frame_ms"] = elapsed_ms
-                times = shared_state.setdefault("frame_times", [])
-                times.append(elapsed_ms)
-                if len(times) > 30:
-                    times.pop(0)
+                frame_timing.append(elapsed_ms)
+                if len(frame_timing) > 30:
+                    frame_timing.pop(0)
             return av.VideoFrame.from_ndarray(img, format="bgr24")
         except Exception:
             # Callback ini jalan di thread kamera. Kalau error-nya dibiarkan
@@ -807,7 +816,7 @@ if logged_in:
     # frame menumpuk dan bisa jadi penyebab koneksi diputus setelah beberapa
     # detik jalan. Hapus setelah ketemu penyebabnya.
     with lock:
-        frame_times = list(shared_state.get("frame_times", []))
+        frame_times = list(frame_timing)
     if frame_times:
         st.caption(
             f"proses frame · rata2={sum(frame_times)/len(frame_times):.0f}ms · "
