@@ -762,8 +762,25 @@ if logged_in:
         # diproses CPU 1-core Streamlit Cloud, dan resolusi yang lebih kecil
         # mempercepat konversi warna + CLAHE. Bonusnya: bandwidth TURN yang
         # terpakai ikut turun banyak, jadi kuota Metered lebih awet.
+        #
+        # facingMode "user" = kamera DEPAN. Tanpa ini, browser HP memilih
+        # kamera bawaannya sendiri — di Android itu biasanya kamera BELAKANG,
+        # yang untuk deteksi kantuk pengemudi jelas tidak ada gunanya: yang
+        # terekam jalanan, bukan wajah.
+        #
+        # Sengaja "ideal", BUKAN {"exact": "user"}. `exact` menjadikannya
+        # syarat mutlak, dan webcam laptop/USB di Windows umumnya tidak
+        # melaporkan facingMode sama sekali — permintaannya akan ditolak
+        # (OverconstrainedError) dan kameranya gagal nyala total. Jadi `exact`
+        # justru berisiko mematikan kamera persis di mesin yang dipakai buat
+        # development dan sidang. Dengan "ideal": di HP tetap terkunci ke
+        # kamera depan, di laptop jatuh ke satu-satunya webcam yang ada.
         media_stream_constraints={
-            "video": {"height": {"ideal": 360}, "frameRate": {"ideal": 15, "max": 20}},
+            "video": {
+                "facingMode": {"ideal": "user"},
+                "height": {"ideal": 360},
+                "frameRate": {"ideal": 15, "max": 20},
+            },
             "audio": True,
         },
         video_html_attrs=VideoHTMLAttributes(
