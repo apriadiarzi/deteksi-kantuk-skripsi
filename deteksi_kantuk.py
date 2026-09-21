@@ -24,10 +24,18 @@ def get_current_location(api_key=None):
 
 def get_mediapipe_app(
     max_num_faces=1,
-    refine_landmarks=True,
+    refine_landmarks=False,
     min_detection_confidence=0.5,
     min_tracking_confidence=0.5,
 ):
+    """Bangun FaceMesh.
+
+    refine_landmarks=False disengaja. Flag itu menyalakan model iris TAMBAHAN
+    yang jalan tiap frame (landmark 468-477), sementara semua indeks yang
+    dipakai di sini — mata, mulut, kemiringan kepala — landmark standar semua.
+    Jadi di versi sebelumnya model itu dihitung tiap frame untuk hasil yang
+    tidak pernah dibaca; mahal sekali di CPU 1-core Streamlit Cloud.
+    """
     face_mesh = mp.solutions.face_mesh.FaceMesh(
         max_num_faces=max_num_faces,
         refine_landmarks=refine_landmarks,
@@ -186,14 +194,24 @@ def plot_text(image, text, origin, color, font=cv2.FONT_HERSHEY_SIMPLEX, fntScal
 # Referensi: Reza (2004) "Realization of the Contrast Limited Adaptive
 # Histogram Equalization (CLAHE) for Real-Time Image Enhancement"
 
+# Objek CLAHE dibuat sekali di sini, bukan di dalam enhance_low_light().
+# Parameternya tidak pernah berubah. Diukur, penghematannya ternyata kecil
+# sekali (createCLAHE memang murah) — ini dibiarkan karena lebih rapi, bukan
+# karena kencang.
+#
+# Sempat dicoba MELEWATI CLAHE untuk frame yang sudah terang, lalu dibatalkan:
+# seluruh enhance_low_light() cuma ~1ms dari ~5ms per frame, jadi tidak ada
+# yang berarti untuk dihemat — sementara melewatinya akan mengubah metodologi
+# CLAHE yang dipakai di skripsi, tergantung terang-gelapnya ruangan.
+_CLAHE = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+
 def enhance_low_light(frame):
     """
     Tingkatkan kecerahan frame di kondisi minim cahaya menggunakan CLAHE.
     Hanya channel luminance (Y) yang diproses agar warna tidak berubah drastis.
     """
     yuv = cv2.cvtColor(frame, cv2.COLOR_BGR2YUV)
-    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
-    yuv[:, :, 0] = clahe.apply(yuv[:, :, 0])
+    yuv[:, :, 0] = _CLAHE.apply(yuv[:, :, 0])
     return cv2.cvtColor(yuv, cv2.COLOR_YUV2BGR)
 
 
@@ -275,7 +293,6 @@ class VideoFrameHandler:
         t.start()
 
     def process(self, frame: np.array, thresholds: dict):
-        frame.flags.writeable = False
         frame_h, frame_w, _ = frame.shape
 
         # Enhance frame untuk kondisi minim cahaya (CLAHE)
@@ -299,8 +316,19 @@ class VideoFrameHandler:
         WARN_TILT_pos   = (pad, int(frame_h / 2 + line * 2))
         ALM_txt_pos     = (pad, int(frame_h / 2 - line * 2))
 
-        results = self.facemesh_model.process(frame)
-        frame.flags.writeable = True
+        # MediaPipe mengharapkan RGB. Sebelumnya frame BGR dikirim apa adanya,
+        # jadi channel merah dan biru tertukar. Pada gambar uji di repo wajahnya
+        # ternyata TETAP kedeteksi walau formatnya salah, jadi ini bukan
+        # perbaikan kecepatan — ini soal benar: model dilatih pada RGB, dan
+        # presisi landmark pada wajah/pencahayaan lain tidak bisa diandalkan
+        # kalau inputnya tertukar begini.
+        #
+        # Salinan RGB-nya ditandai read-only supaya MediaPipe boleh memakainya
+        # tanpa menyalin lagi; `frame` sendiri tetap BGR dan tetap bisa ditulisi
+        # oleh fungsi-fungsi plot_* di bawah.
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        rgb.flags.writeable = False
+        results = self.facemesh_model.process(rgb)
 
         if results.multi_face_landmarks:
             landmarks = results.multi_face_landmarks[0].landmark
