@@ -703,33 +703,12 @@ if logged_in:
     lock = threading.Lock()
     shared_state = {"play_alarm": False}
 
-    # DIAGNOSTIK SEMENTARA — disimpan di session_state (BUKAN variabel biasa
-    # seperti shared_state di atas), karena harus bertahan lintas rerun.
-    # shared_state dibuat ulang kosong tiap detik oleh st_autorefresh, jadi
-    # kode yang membacanya di render yang SAMA selalu melihatnya kosong —
-    # belum ada waktu berlalu untuk thread kamera sempat menulis apa pun ke
-    # situ sebelum baris pembacaannya jalan. video_handler sendiri sudah
-    # memakai pola session_state ini untuk alasan yang persis sama.
-    if "frame_timing" not in st.session_state:
-        st.session_state["frame_timing"] = []
-    frame_timing = st.session_state["frame_timing"]
-
     def video_frame_callback(frame: av.VideoFrame):
         try:
-            t0 = time.perf_counter()
             img = frame.to_ndarray(format="bgr24")
             img, play_alarm = video_handler.process(img, thresholds)
             with lock:
                 shared_state["play_alarm"] = play_alarm
-            # Mengukur berapa lama process() (CLAHE + MediaPipe) benar-benar
-            # makan waktu di CPU cloud yang sebenarnya. Kalau ini mendekati/
-            # melebihi jarak antar frame (misal ~33ms utk 30fps), frame
-            # menumpuk dan bisa memicu koneksi WebRTC diputus.
-            elapsed_ms = (time.perf_counter() - t0) * 1000
-            with lock:
-                frame_timing.append(elapsed_ms)
-                if len(frame_timing) > 30:
-                    frame_timing.pop(0)
             return av.VideoFrame.from_ndarray(img, format="bgr24")
         except Exception:
             # Callback ini jalan di thread kamera. Kalau error-nya dibiarkan
@@ -738,8 +717,13 @@ if logged_in:
             # bisa dilacak, ditandai supaya main thread bisa memberi tahu user,
             # dan frame aslinya tetap dikembalikan supaya koneksinya tidak
             # ikut mati.
+            #
+            # Traceback-nya cukup dicetak SEKALI. Callback ini dipanggil tiap
+            # frame (15x per detik), jadi error yang berulang di tiap frame
+            # akan membanjiri terminal dengan traceback yang isinya sama.
+            if not getattr(video_handler, "last_error", False):
+                print("Error di video_frame_callback:\n" + traceback.format_exc())
             video_handler.last_error = True
-            print("Error di video_frame_callback:\n" + traceback.format_exc())
             return frame
 
     def audio_frame_callback(frame: av.AudioFrame):
@@ -868,18 +852,6 @@ if logged_in:
 
     if getattr(video_handler, "last_error", None):
         st.warning("Ada gangguan saat memproses frame kamera. Detailnya tercatat di log aplikasi.")
-
-    # DIAGNOSTIK SEMENTARA — berapa lama process() (CLAHE+MediaPipe) beneran
-    # makan waktu di CPU cloud. Kalau mendekati/lewat jarak antar frame,
-    # frame menumpuk dan bisa jadi penyebab koneksi diputus setelah beberapa
-    # detik jalan. Hapus setelah ketemu penyebabnya.
-    with lock:
-        frame_times = list(frame_timing)
-    if frame_times:
-        st.caption(
-            f"proses frame · rata2={sum(frame_times)/len(frame_times):.0f}ms · "
-            f"maks={max(frame_times):.0f}ms · sampel={len(frame_times)}"
-        )
 
 # ══════════════════════════════════════════════════════════════════════════════
 # BELUM LOGIN

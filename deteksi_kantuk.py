@@ -284,7 +284,6 @@ class VideoFrameHandler:
                 for recipient in self.email_recipients:
                     msg["To"] = recipient
                     server.sendmail(self.email_sender, recipient, msg.as_string())
-                    print(f"Email terkirim ke {recipient}")
         except Exception as e:
             print(f"Gagal mengirim email: {e}")
 
