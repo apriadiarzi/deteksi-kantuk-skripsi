@@ -676,17 +676,22 @@ if logged_in:
         WAIT_TIME = st.slider("Waktu alarm menyala (detik):", 0.0, 5.0, 1.0, 0.25,
             help="Berapa lama kondisi kantuk berlangsung sebelum alarm berbunyi. "
                  "Berlaku untuk semua jenis deteksi. "
-                 "Referensi: Wierwille & Ellsworth (1994) menyarankan 1–2 detik.")
+                 "Referensi: Albadawi et al. (2023) menganggap mata tertutup ≥ 0,4–0,5 detik "
+                 "sebagai kedipan mengantuk; Florez et al. (2024) membunyikan alarm setelah "
+                 "mata tertutup > 0,3 detik.")
         MAR_THRESH = st.slider("Ambang batas mulut (menguap):", 0.3, 1.0, 0.6, 0.01,
             help="Nilai MAR di atas threshold = mulut terbuka lebar = menguap. "
-                 "Referensi: Mandal et al. (2017) & Vural et al. (2007), default 0.6.")
+                 "Referensi: Albadawi et al. (2023) memakai 0,5; Baul et al. (2025) memakai "
+                 "0,65 pada MediaPipe Face Mesh. Default 0,6 berada di antara keduanya.")
     with s2:
         EAR_THRESH = st.slider("Ambang batas mata (tertutup):", 0.0, 0.4, 0.23, 0.01,
             help="Nilai EAR di bawah threshold = mata tertutup = mengantuk. "
-                 "Referensi: Soukupová & Čech (2016) menyarankan 0.2–0.25.")
+                 "Referensi: Dewi et al. (2022) mendapati 0,18 sebagai ambang optimal; "
+                 "Albadawi et al. (2023) memakai 0,2; Baul et al. (2025) memakai 0,22 "
+                 "pada MediaPipe Face Mesh.")
         TILT_THRESH = st.slider("Ambang batas kemiringan kepala (°):", 5.0, 45.0, 20.0, 1.0,
             help="Sudut kemiringan kepala dari posisi tegak. "
-                 "Referensi: Sahayadhas et al. (2012) — > 15° kantuk ringan, > 25° kantuk berat.")
+                 "Referensi: Baul et al. (2025) memakai ±20° pada MediaPipe Face Mesh.")
 
     thresholds = {
         "EAR_THRESH": EAR_THRESH, "WAIT_TIME": WAIT_TIME,

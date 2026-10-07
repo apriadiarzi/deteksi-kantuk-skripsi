@@ -74,7 +74,10 @@ def calculate_avg_ear(landmarks, left_eye_idxs, right_eye_idxs, image_w, image_h
     return Avg_EAR, (left_lm_coordinates, right_lm_coordinates)
 
 # ─── MAR ──────────────────────────────────────────────────────────────────────
-# Threshold default 0.6 — Mandal et al. (2017) & Vural et al. (2007)
+# Threshold default 0.6 — di antara 0.5 (Albadawi et al., 2023) dan 0.65
+# (Baul et al., 2025, MediaPipe Face Mesh). Catatan: rumus MAR tiap paper
+# memakai titik bibir yang berbeda, jadi angkanya tidak bisa dibandingkan
+# persis satu-satu — ini sebabnya threshold dibuat bisa diatur lewat slider.
 #
 #        P3(0)
 #   P2(39)   P5(269)
@@ -86,10 +89,19 @@ def calculate_avg_ear(landmarks, left_eye_idxs, right_eye_idxs, image_w, image_h
 
 MOUTH_IDXS = [61, 39, 0, 291, 269, 375, 17, 146]
 
-# Minimum durasi event agar masuk database (detik)
-MIN_DURATION_EYE  = 1.0   # Soukupová & Čech (2016)
-MIN_DURATION_YAWN = 1.0   # Vural et al. (2007)
-MIN_DURATION_TILT = 1.5   # Sahayadhas et al. (2012)
+# Minimum durasi event agar masuk database (detik). Fungsinya menyaring noise,
+# bukan mendeteksi — jadi sengaja dibuat lebih panjang dari angka referensi.
+#   Mata  : kedipan normal 100–400 ms, kedipan mengantuk ≥ 0,4–0,5 detik
+#           (Albadawi et al., 2023). 1 detik pasti membuang kedipan normal.
+#   Menguap: satu kali menguap berlangsung sekitar 4–6 detik (Albadawi et al.,
+#           2023); Florez et al. (2024) mensyaratkan MAR terlampaui ≥ 5 detik.
+#           1 detik cukup untuk tetap menangkap seluruh kejadian menguap.
+#   Kepala: tidak ada referensi durasi; ditetapkan sendiri, sedikit lebih lama
+#           dari mata/mulut karena kepala lebih sering bergerak sesaat
+#           (menoleh ke spion, melihat dashboard).
+MIN_DURATION_EYE  = 1.0
+MIN_DURATION_YAWN = 1.0
+MIN_DURATION_TILT = 1.5
 
 
 def get_mar(landmarks, mouth_idxs, frame_width, frame_height):
@@ -112,11 +124,13 @@ def get_mar(landmarks, mouth_idxs, frame_width, frame_height):
 
 # ─── Head Tilt (kemiringan kepala) ────────────────────────────────────────────
 # Referensi threshold:
-#   Sahayadhas et al. (2012) "Detecting Driver Drowsiness Based on Sensors"
-#   Mbouna et al. (2013) "Visual Analysis of Eye State and Head Pose for Driver Alertness Monitoring"
-#   → Kemiringan kepala > 15° dianggap tanda kantuk ringan
-#   → Kemiringan kepala > 25°–30° dianggap tanda kantuk berat
-#   Default threshold: 20° (tengah antara dua referensi)
+#   Baul et al. (2025) "Development of a Real-time Driver's Drowsiness
+#   Detection System Using MediaPipe Face Mesh" — memakai ±20°, dengan
+#   MediaPipe Face Mesh yang sama seperti sistem ini.
+#   Default threshold: 20°
+#
+#   Sugeng & Nizar (2023) memakai batas yang jauh lebih longgar (> 45°)
+#   dengan metode berbeda (garis dahi–dagu, bukan garis antar-telinga).
 #
 # Metode: hitung sudut kemiringan dari garis antara dua tragus telinga
 #   Left ear tragus  = landmark 234
@@ -130,7 +144,7 @@ def get_head_tilt_angle(landmarks, frame_width, frame_height):
     """
     Hitung sudut kemiringan kepala dalam derajat.
     0° = tegak lurus, positif = miring kanan, negatif = miring kiri.
-    Referensi: Sahayadhas et al. (2012), Mbouna et al. (2013)
+    Referensi: Baul et al. (2025)
     """
     try:
         left  = landmarks[EAR_LEFT_TRAGUS]
@@ -191,8 +205,10 @@ def plot_text(image, text, origin, color, font=cv2.FONT_HERSHEY_SIMPLEX, fntScal
     return image
 
 # ─── Low-light Enhancement ────────────────────────────────────────────────────
-# Referensi: Reza (2004) "Realization of the Contrast Limited Adaptive
-# Histogram Equalization (CLAHE) for Real-Time Image Enhancement"
+# Referensi: Aprilia & Fitrianah (2025) "Automatic drowsiness detection system
+# to reduce road accident risks" — CLAHE untuk deteksi kantuk di kondisi minim
+# cahaya. Mereka memakai clip limit 2.0 dengan tile 8×8; di sini clip limit-nya
+# 3.0 (kontras lebih kuat), tile-nya sama.
 
 # Objek CLAHE dibuat sekali di sini, bukan di dalam enhance_low_light().
 # Parameternya tidak pernah berubah. Diukur, penghematannya ternyata kecil
