@@ -12,6 +12,8 @@ from email.mime.multipart import MIMEMultipart
 import streamlit as st
 import streamlit_nested_layout
 from streamlit_webrtc import VideoHTMLAttributes, webrtc_streamer
+from aiortc import RTCIceServer
+from aiortc.rtcicetransport import RTCIceGatherer
 import streamlit.components.v1 as components
 from streamlit_autorefresh import st_autorefresh
 
@@ -120,6 +122,61 @@ def build_ice_servers():
         return _cache(OPEN_RELAY_FALLBACK, 60)
 
     return _cache(servers, 1800)
+
+# ── Pangkas daftar TURN ───────────────────────────────────────────────────────
+# Frontend streamlit-webrtc baru mengirim offer setelah SEMUA alamat TURN
+# selesai merespons (menunggu iceGatheringState "complete"), tanpa batas waktu.
+# Metered memberi 5 alamat, dan cukup satu port yang diblokir jaringan
+# (umum di jaringan seluler / Wi-Fi kampus) untuk membuat START tertahan
+# sampai browser menyerah pada alamat itu. Dua jalur sudah menutup semua
+# kondisi: TURN lewat UDP (jalur tercepat) dan TURN lewat TLS port 443 (lolos
+# hampir semua firewall, karena terlihat seperti HTTPS biasa).
+def trim_turn_urls(servers):
+    trimmed, have_udp, have_tls = [], False, False
+    for s in servers:
+        urls = s["urls"] if isinstance(s["urls"], list) else [s["urls"]]
+        kept = []
+        for u in urls:
+            if u.startswith("stun:"):
+                kept.append(u)
+            elif u.startswith("turn:") and "transport=tcp" not in u and not have_udp:
+                kept.append(u)
+                have_udp = True
+            elif u.startswith("turns:") and not have_tls:
+                kept.append(u)
+                have_tls = True
+        if kept:
+            trimmed.append({**s, "urls": kept})
+    return trimmed
+
+# ── TURN untuk sisi SERVER juga ───────────────────────────────────────────────
+# rtc_configuration di webrtc_streamer() cuma dipakai BROWSER. Sisi server
+# (aiortc) dibuat oleh streamlit-webrtc 0.43.4 dengan RTCPeerConnection() polos,
+# sehingga aiortc memakai bawaannya: STUN Google saja, tanpa TURN.
+#
+# Padahal server Streamlit Cloud sendiri ada di balik NAT. Kalau alamat
+# publiknya dari STUN gagal didapat, kandidat server tinggal IP privat
+# kontainer — yang tidak bisa dicapai relay milik browser. ICE berakhir
+# `failed`, dan frontend komponennya otomatis berhenti begitu ICE `failed`/
+# `disconnected`: video tidak pernah muncul dan tombol balik sendiri ke START.
+#
+# Dengan kredensial TURN yang sama, server ikut punya kandidat relay sendiri,
+# jadi selalu ada jalur relay↔relay yang pasti bisa dipakai. Jalur itu
+# prioritasnya paling rendah, jadi cuma terpakai kalau jalur yang lebih langsung
+# gagal — dan saat terpakai, media melewati relay dua kali, kuota ikut dobel.
+# Diukur di lokal: menambah ~0,1 detik saat mulai menyambung.
+#
+# Caranya lewat RTCIceGatherer.getDefaultIceServers, yang dipanggil aiortc saat
+# RTCPeerConnection dibuat tanpa konfigurasi (sudah dicek ada di aiortc 1.9.0,
+# versi yang terpasang di cloud). streamlit-webrtc versi baru punya parameter
+# `server_rtc_configuration` untuk ini, tapi menaikkan versinya ikut menyeret
+# versi streamlit yang sengaja dikunci di 1.17.0 (lihat requirements.txt).
+def use_ice_servers_on_server(servers):
+    rtc_servers = [
+        RTCIceServer(urls=s["urls"], username=s.get("username"), credential=s.get("credential"))
+        for s in servers
+    ]
+    RTCIceGatherer.getDefaultIceServers = classmethod(lambda cls: list(rtc_servers))
 
 # ── Sesi login ────────────────────────────────────────────────────────────────
 # PENTING: dulu ini disimpan lewat file cookies.pkl di server — itu BUKAN
@@ -650,7 +707,11 @@ if logged_in:
         if st.button("Keluar"):
             # Auto-save sesi aktif sebelum logout
             if st.session_state.get("is_monitoring") and st.session_state.get("session_id"):
-                pending = video_handler.pending_events if "video_handler" in st.session_state else []
+                # Dibaca dari session_state, bukan variabel `video_handler` —
+                # variabel itu baru dibuat jauh di bawah sini, jadi dulu baris
+                # ini selalu NameError dan sesi aktif tidak pernah tersimpan.
+                handler = st.session_state.get("video_handler")
+                pending = handler.pending_events if handler else []
                 if is_guest:
                     save_guest_session(st.session_state["session_id"], st.session_state.get("guest_session_start"), pending)
                 else:
@@ -740,11 +801,13 @@ if logged_in:
     # untuk mengakali START yang kadang macet, tapi itu menyisakan instance
     # komponen lama tiap siklus STOP→START — dugaan kuat penyebab kamera makin
     # sering gagal nyambung setelah dipakai beberapa kali.
+    ice_servers = trim_turn_urls(build_ice_servers())
+    use_ice_servers_on_server(ice_servers)
     ctx = webrtc_streamer(
         key="drowsiness-detection",
         video_frame_callback=video_frame_callback,
         audio_frame_callback=audio_frame_callback,
-        rtc_configuration={"iceServers": build_ice_servers()},
+        rtc_configuration={"iceServers": ice_servers},
         # 360p @ 15fps, bukan 480p pada fps bawaan (biasanya 30). Kejadian
         # kantuk diukur dalam hitungan detik, jadi 15fps lebih dari cukup —
         # sementara memangkas fps langsung memotong jumlah frame yang harus
@@ -881,18 +944,43 @@ else:
             username = st.text_input("Username", placeholder="Masukkan username kamu")
             password = st.text_input("Password", type="password", placeholder="Masukkan password kamu")
 
+            logging_in = st.session_state.get('logging_in', False)
+
             st.markdown('<div class="btn-primary-marker"></div>', unsafe_allow_html=True)
-            if st.button("Masuk"):
+            if logging_in:
+                st.button("Memproses...", disabled=True, key="login_btn_busy")
+            elif st.button("Masuk", key="login_btn"):
+                # Sama seperti tombol Verifikasi: query DB-nya ditunda ke render
+                # berikutnya supaya tombolnya sempat terkunci lebih dulu. Tanpa
+                # ini, tiap klik beruntun selagi query berjalan memicu rerun
+                # baru dan query login dijalankan berkali-kali.
                 if not username or not password:
                     st.error("Tolong lengkapi semua field.")
-                elif not check_username_exists(username):
-                    st.error("Username belum terdaftar. Silakan daftar terlebih dahulu.")
-                elif check_login(username, sha256(password.encode()).hexdigest()):
-                    set_cookie(username)
-                    st.success("Masuk berhasil!")
-                    st.experimental_rerun()
                 else:
-                    st.error("Password salah. Silakan coba lagi.")
+                    st.session_state['logging_in']    = True
+                    st.session_state['login_attempt'] = (username, password)
+                    st.experimental_rerun()
+
+            if logging_in:
+                login_user, login_pw = st.session_state.get('login_attempt', ('', ''))
+                try:
+                    if not check_username_exists(login_user):
+                        st.session_state['login_error'] = "Username belum terdaftar. Silakan daftar terlebih dahulu."
+                    elif check_login(login_user, sha256(login_pw.encode()).hexdigest()):
+                        set_cookie(login_user)
+                    else:
+                        st.session_state['login_error'] = "Password salah. Silakan coba lagi."
+                except Exception as e:
+                    # Wajib ditangkap: kalau error-nya lolos, flag logging_in
+                    # tidak pernah direset dan tombolnya terkunci selamanya.
+                    print(f"Login gagal: {e}")
+                    st.session_state['login_error'] = "Gagal menghubungi server. Periksa koneksi internet kamu lalu coba lagi."
+                st.session_state['logging_in'] = False
+                st.session_state.pop('login_attempt', None)
+                st.experimental_rerun()
+
+            if st.session_state.get('login_error'):
+                st.error(st.session_state.pop('login_error'))
 
             st.markdown("---")
             st.markdown("Belum punya akun?")
@@ -936,50 +1024,60 @@ else:
                 if email_invalid:
                     st.markdown('<p class="field-error-text">Masukkan alamat email yang valid.</p>', unsafe_allow_html=True)
 
-                sending_otp = st.session_state.get('sending_otp', False)
+                registering = st.session_state.get('sending_otp', False)
 
                 st.markdown('<div class="btn-primary-marker"></div>', unsafe_allow_html=True)
-                if sending_otp:
-                    st.button("Mengirim...", disabled=True, key="send_otp_btn_sending")
+                if registering:
+                    st.button("Memproses...", disabled=True, key="send_otp_btn_sending")
                 elif st.button("Daftar", key="send_otp_btn"):
+                    # SEMUA jalur daftar lewat penundaan ini, termasuk yang tanpa
+                    # email. Dulu jalur tanpa email langsung memanggil add_user()
+                    # di render klik itu juga — klik beruntun memanggilnya dua
+                    # kali, dan yang kedua menabrak UNIQUE username di database.
                     if not username or not password:
                         st.error("Tolong lengkapi username dan password.")
-                    elif check_username_exists(username):
-                        st.error("Username sudah digunakan. Coba username lain.")
                     elif email_invalid:
                         pass  # sudah kelihatan di teks merah bawah field-nya
-                    elif not email.strip():
-                        # Tanpa email — daftar langsung, tanpa verifikasi OTP
-                        pw_hash = sha256(password.encode()).hexdigest()
-                        add_user(username, "", pw_hash)
-                        set_cookie(username)
-                        st.success("Akun berhasil dibuat! Selamat datang 🎉")
-                        st.experimental_rerun()
                     else:
                         st.session_state['sending_otp']       = True
                         st.session_state['pending_username']  = username
-                        st.session_state['pending_email']     = email
+                        st.session_state['pending_email']     = email.strip()
                         st.session_state['pending_password']  = password
                         st.experimental_rerun()
 
-                if sending_otp:
-                    otp = generate_otp()
-                    pw_hash = sha256(st.session_state['pending_password'].encode()).hexdigest()
-                    save_otp(st.session_state['pending_email'], otp, st.session_state['pending_username'], pw_hash)
-                    success = send_otp_email(st.session_state['pending_email'], otp, st.session_state['pending_username'])
+                if registering:
+                    reg_user  = st.session_state['pending_username']
+                    reg_email = st.session_state['pending_email']
+                    pw_hash   = sha256(st.session_state['pending_password'].encode()).hexdigest()
+                    try:
+                        if check_username_exists(reg_user):
+                            st.session_state['register_error'] = "Username sudah digunakan. Coba username lain."
+                        elif not reg_email:
+                            # Tanpa email — daftar langsung, tanpa verifikasi OTP
+                            add_user(reg_user, "", pw_hash)
+                            set_cookie(reg_user)
+                        else:
+                            otp = generate_otp()
+                            save_otp(reg_email, otp, reg_user, pw_hash)
+                            if send_otp_email(reg_email, otp, reg_user):
+                                st.session_state['reg_username']      = reg_user
+                                st.session_state['reg_email']         = reg_email
+                                st.session_state['reg_password_hash'] = pw_hash
+                                st.session_state['otp_step']          = True
+                                st.session_state['otp_last_sent']     = time.time()
+                            else:
+                                st.session_state['register_error'] = "Gagal mengirim email. Periksa kembali alamat email dan coba lagi."
+                    except Exception as e:
+                        # Wajib ditangkap: kalau error-nya lolos, flag sending_otp
+                        # tidak pernah direset dan tombolnya terkunci selamanya.
+                        print(f"Pendaftaran gagal: {e}")
+                        st.session_state['register_error'] = "Gagal menghubungi server. Periksa koneksi internet kamu lalu coba lagi."
                     st.session_state['sending_otp'] = False
-                    if success:
-                        st.session_state['reg_username']      = st.session_state['pending_username']
-                        st.session_state['reg_email']         = st.session_state['pending_email']
-                        st.session_state['reg_password_hash'] = pw_hash
-                        st.session_state['otp_step']          = True
-                        st.session_state['otp_last_sent']     = time.time()
-                    else:
-                        st.session_state['send_otp_failed'] = True
+                    st.session_state.pop('pending_password', None)
                     st.experimental_rerun()
 
-                if st.session_state.pop('send_otp_failed', False):
-                    st.error("Gagal mengirim email. Periksa kembali alamat email dan coba lagi.")
+                if st.session_state.get('register_error'):
+                    st.error(st.session_state.pop('register_error'))
 
             # ── Verifikasi OTP — muncul menggantikan form, tanpa pindah halaman ──
             else:
@@ -1040,17 +1138,31 @@ else:
                 # diperlonggar dan dimatikan total selama verifikasi berjalan.
                 if remaining > 0 and not otp_input and not verifying:
                     st_autorefresh(interval=3000, limit=12, key=f"resend_countdown_{st.session_state['otp_last_sent']}")
+                resending = st.session_state.get('resending_otp', False)
                 if remaining > 0:
                     st.markdown(f'<p style="text-align:right; font-size:0.8rem; color:var(--muted);">Kirim ulang ({remaining}s)</p>', unsafe_allow_html=True)
+                elif resending:
+                    st.markdown('<div class="btn-link-marker-right"></div>', unsafe_allow_html=True)
+                    st.button("Mengirim...", disabled=True, key="resend_otp_btn_busy")
                 else:
                     st.markdown('<div class="btn-link-marker-right"></div>', unsafe_allow_html=True)
                     if st.button("Kirim ulang", key="resend_otp_btn"):
-                        with st.spinner("Mengirim kode..."):
-                            otp = generate_otp()
-                            save_otp(st.session_state['reg_email'], otp, st.session_state['reg_username'], st.session_state['reg_password_hash'])
-                            send_otp_email(st.session_state['reg_email'], otp, st.session_state['reg_username'])
-                            st.session_state['otp_last_sent'] = time.time()
+                        # Dikunci dulu baru dikirim, sama seperti tombol Daftar —
+                        # tanpa ini klik beruntun mengirim beberapa email OTP.
+                        st.session_state['resending_otp'] = True
                         st.experimental_rerun()
+
+                if resending:
+                    try:
+                        otp = generate_otp()
+                        save_otp(st.session_state['reg_email'], otp, st.session_state['reg_username'], st.session_state['reg_password_hash'])
+                        send_otp_email(st.session_state['reg_email'], otp, st.session_state['reg_username'])
+                    except Exception as e:
+                        print(f"Kirim ulang OTP gagal: {e}")
+                        st.session_state['otp_error'] = "Gagal mengirim ulang kode. Coba lagi sebentar lagi."
+                    st.session_state['otp_last_sent'] = time.time()
+                    st.session_state['resending_otp'] = False
+                    st.experimental_rerun()
 
             st.markdown("---")
             st.markdown("Sudah punya akun?")
