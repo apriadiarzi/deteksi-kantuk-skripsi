@@ -13,15 +13,6 @@ from datetime import datetime
 from database import now_wib
 # database di-handle dari Streamlit saat Stop
 
-# ── Cache lokasi dari browser ─────────────────────────────────────────────────
-_location_cache = {"maps_link": "Lokasi tidak tersedia"}
-
-def set_location_cache(maps_link: str):
-    _location_cache["maps_link"] = maps_link
-
-def get_current_location(api_key=None):
-    return _location_cache["maps_link"]
-
 def get_mediapipe_app(
     max_num_faces=1,
     refine_landmarks=False,
@@ -231,6 +222,20 @@ def enhance_low_light(frame):
     return cv2.cvtColor(yuv, cv2.COLOR_YUV2BGR)
 
 
+# ─── Pembatasan email darurat ─────────────────────────────────────────────────
+# Paling banyak SATU email per jendela ini, untuk semua jenis kejadian sekaligus
+# (mata tertutup, menguap, kepala miring). Kejadian pertama langsung dikirim;
+# kejadian lain di dalam jendela tidak dikirim, tapi DIHITUNG, lalu dilaporkan
+# sebagai satu email ringkasan begitu jendelanya habis. Jadi penerima tetap
+# tahu pengemudinya berulang kali mengantuk — tanpa kotak masuknya dibanjiri.
+EMAIL_COOLDOWN_SECONDS = 5 * 60
+
+EVENT_LABELS = {
+    "eye_close": "mata tertutup",
+    "yawn":      "menguap",
+    "head_tilt": "kepala miring",
+}
+
 # ─── Main Handler ─────────────────────────────────────────────────────────────
 
 class VideoFrameHandler:
@@ -239,6 +244,17 @@ class VideoFrameHandler:
         self.email_sender   = "deteksikantuk@gmail.com"
         self.email_password = config('EMAIL_PASSWORD', default='')
         self.email_recipients = []  # diisi dari Streamlit sesuai email akun yang login; kosong = tidak kirim (mis. tamu)
+        # Link Google Maps posisi terakhir pengemudi, diisi dari Streamlit.
+        # Disimpan per handler (= per sesi browser). Dulu ini satu variabel
+        # global di modul, yang dipakai bersama SEMUA pengguna di server —
+        # email darurat pengguna A bisa berisi lokasi pengguna B.
+        self.location_link = "Lokasi tidak tersedia"
+
+        # Status pembatasan email (lihat EMAIL_COOLDOWN_SECONDS). Disimpan di
+        # handler, yang hidup di session_state, jadi jedanya tetap berlaku
+        # walau kamera di-STOP lalu START lagi.
+        self._last_email_at  = None  # time.monotonic() saat email terakhir dikirim
+        self._held_events    = {}    # jenis kejadian -> jumlah yang ditahan
 
         self.eye_idxs = {
             "left":  [362, 385, 387, 263, 373, 380],
@@ -286,8 +302,7 @@ class VideoFrameHandler:
     def _send_email_worker(self, subject: str, message: str):
         """Background thread — tidak membekukan video."""
         try:
-            location_link = get_current_location()
-            full_message  = f"{message}\n\nLokasi pengguna saat ini: {location_link}"
+            full_message  = f"{message}\n\nLokasi pengguna saat ini: {self.location_link}"
 
             msg = MIMEMultipart()
             msg["From"]    = self.email_sender
@@ -298,6 +313,9 @@ class VideoFrameHandler:
                 server.starttls()
                 server.login(self.email_sender, self.email_password)
                 for recipient in self.email_recipients:
+                    # `msg["To"] = ...` MENAMBAH header, bukan mengganti — tanpa
+                    # del, penerima kedua ikut melihat alamat penerima pertama.
+                    del msg["To"]
                     msg["To"] = recipient
                     server.sendmail(self.email_sender, recipient, msg.as_string())
         except Exception as e:
@@ -307,8 +325,54 @@ class VideoFrameHandler:
         t = threading.Thread(target=self._send_email_worker, args=(subject, message), daemon=True)
         t.start()
 
+    def _email_window_open(self) -> bool:
+        return (self._last_email_at is None
+                or time.monotonic() - self._last_email_at >= EMAIL_COOLDOWN_SECONDS)
+
+    def request_email_alert(self, kind: str, subject: str, message: str):
+        """Minta email darurat untuk satu kejadian, lewat pembatas.
+
+        Kalau jendela jeda sudah lewat, email langsung dikirim. Kalau belum,
+        kejadiannya cuma dihitung — nanti dilaporkan oleh flush_held_emails().
+        """
+        if not self.email_recipients:
+            return  # tamu / akun tanpa email: tidak ada yang perlu dikirimi
+        if self._email_window_open():
+            self._last_email_at = time.monotonic()
+            self.send_email_alert(subject, message)
+        else:
+            self._held_events[kind] = self._held_events.get(kind, 0) + 1
+
+    def flush_held_emails(self):
+        """Kirim SATU email ringkasan untuk kejadian yang ditahan, begitu
+        jendela jedanya habis. Dipanggil tiap frame dari process()."""
+        if not self._held_events or not self._email_window_open():
+            return
+        rincian = ", ".join(
+            f"{jumlah}× {EVENT_LABELS.get(jenis, jenis)}"
+            for jenis, jumlah in self._held_events.items()
+        )
+        menit = EMAIL_COOLDOWN_SECONDS // 60
+        self._held_events.clear()
+        self._last_email_at = time.monotonic()
+        self.send_email_alert(
+            "⚠️ Pengemudi Masih Terdeteksi Mengantuk",
+            f"Dalam {menit} menit terakhir sejak email sebelumnya, sistem kembali "
+            f"mendeteksi tanda kantuk pada pengemudi: {rincian}.\n\n"
+            "Kejadian yang berulang menandakan pengemudi masih mengantuk. Mohon "
+            "segera hubungi pengemudi dan sarankan untuk menepi dan beristirahat "
+            "di rest area terdekat.\n\n"
+            f"Untuk mencegah spam, email dari sistem ini dikirim paling banyak "
+            f"satu kali setiap {menit} menit.\n\n"
+            "Pesan ini dikirim otomatis oleh Sistem Pendeteksi Kantuk."
+        )
+
     def process(self, frame: np.array, thresholds: dict):
         frame_h, frame_w, _ = frame.shape
+
+        # Dicek di awal, sebelum deteksi wajah — kalau kepala pengemudi sampai
+        # terkulai dan wajahnya tidak terdeteksi, ringkasan tetap harus terkirim.
+        self.flush_held_emails()
 
         # Enhance frame untuk kondisi minim cahaya (CLAHE)
         frame = enhance_low_light(frame)
@@ -379,9 +443,10 @@ class VideoFrameHandler:
                     plot_text(frame, "MATA TERTUTUP!", WARN_DROWSY_pos, self.RED)
 
                     if not self.state_tracker["message_sent"] and self.state_tracker["DROWSY_TIME"] >= 5:
-                        self.send_email_alert(
+                        self.request_email_alert(
+                            "eye_close",
                             "⚠️ Pengemudi Terdeteksi Mengantuk!",
-                            "Halo,\n\nKami mendeteksi bahwa mata pengemudi tertutup selama "
+                            "Kami mendeteksi bahwa mata pengemudi tertutup selama "
                             "lebih dari 5 detik saat berkendara. Kondisi ini merupakan tanda "
                             "bahwa pengemudi sedang tertidur atau sangat mengantuk, dan "
                             "sangat berbahaya jika dibiarkan.\n\n"
@@ -418,9 +483,10 @@ class VideoFrameHandler:
                 plot_text(frame, "MENGUAP TERDETEKSI!", WARN_YAWN_pos, self.ORANGE)
 
                 if not self.state_tracker["yawn_message_sent"] and self.state_tracker["YAWN_TIME"] >= 3:
-                    self.send_email_alert(
+                    self.request_email_alert(
+                        "yawn",
                         "⚠️ Pengemudi Terdeteksi Mengantuk!",
-                        "Halo,\n\nKami mendeteksi bahwa pengemudi telah menguap selama "
+                        "Kami mendeteksi bahwa pengemudi telah menguap selama "
                         "lebih dari 3 detik saat berkendara. Menguap berlebihan merupakan "
                         "tanda awal rasa kantuk yang dapat membahayakan keselamatan "
                         "berkendara.\n\n"
@@ -457,9 +523,10 @@ class VideoFrameHandler:
                 plot_text(frame, "KEPALA MIRING!", WARN_TILT_pos, self.YELLOW)
 
                 if not self.state_tracker["tilt_message_sent"] and self.state_tracker["TILT_TIME"] >= 5:
-                    self.send_email_alert(
+                    self.request_email_alert(
+                        "head_tilt",
                         "⚠️ Pengemudi Terdeteksi Mengantuk!",
-                        f"Halo,\n\nKami mendeteksi bahwa kepala pengemudi miring ke samping "
+                        f"Kami mendeteksi bahwa kepala pengemudi miring ke samping "
                         f"selama lebih dari 5 detik saat berkendara. Kondisi ini biasanya "
                         f"terjadi ketika pengemudi tertidur atau hampir tertidur, dan sangat "
                         f"berbahaya jika dibiarkan.\n\n"

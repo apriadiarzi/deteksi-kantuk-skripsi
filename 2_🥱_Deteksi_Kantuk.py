@@ -18,7 +18,7 @@ import streamlit.components.v1 as components
 from streamlit_autorefresh import st_autorefresh
 
 from audio_handling import AudioFrameHandler
-from deteksi_kantuk import VideoFrameHandler, set_location_cache
+from deteksi_kantuk import VideoFrameHandler
 from database import (
     create_db, add_user, check_username_exists, check_login,
     start_session, end_session, save_otp, verify_otp, get_user_email,
@@ -38,6 +38,12 @@ create_db()
 # ── Konstanta email pengirim ──────────────────────────────────────────────────
 EMAIL_SENDER   = "deteksikantuk@gmail.com"
 EMAIL_PASSWORD = config('EMAIL_PASSWORD')
+
+# Komponen pelacak lokasi untuk email darurat — lihat components/geolocation.
+geolocation_component = components.declare_component(
+    "geolocation",
+    path=os.path.join(os.path.dirname(os.path.abspath(__file__)), "components", "geolocation"),
+)
 
 # Berapa detik kamera harus benar-benar mati sebelum sesi dianggap selesai.
 # Jangan dibikin terlalu pendek: kalau koneksi WebRTC sempat goyang sebentar,
@@ -560,8 +566,6 @@ video {
 
 # ─── App ─────────────────────────────────────────────────────────────────────
 query_params = st.experimental_get_query_params()
-if "loc" in query_params:
-    set_location_cache(query_params["loc"][0])
 
 # Sesi baru (abis refresh / tab baru) belum tahu siapa usernya sampai token di
 # localStorage browser ini sempat dibaca — lihat blok "Pulihkan login" di bawah.
@@ -662,26 +666,6 @@ if logged_in:
                 st.session_state["email_recipient_for"] = user
             st.session_state["email_recipient_cached"] = [recipient_email] if recipient_email else []
         recipient_emails = st.session_state.get("email_recipient_cached", [])
-
-    # GPS realtime — cuma diminta kalau memang ada tujuan emailnya
-    if recipient_emails:
-        components.html("""
-        <script>
-        if (navigator.geolocation) {
-            navigator.geolocation.watchPosition(
-                function(pos) {
-                    const lat = pos.coords.latitude;
-                    const lon = pos.coords.longitude;
-                    const link = "https://www.google.com/maps?q=" + lat + "," + lon;
-                    const newUrl = window.parent.location.href.split("?")[0] + "?loc=" + encodeURIComponent(link);
-                    window.parent.history.replaceState(null, "", newUrl);
-                },
-                function(err) { console.error("Gagal ambil lokasi:", err); },
-                { enableHighAccuracy: true, maximumAge: 0 }
-            );
-        }
-        </script>
-        """, height=0)
 
     # Cegah layar mati saat deteksi berjalan
     components.html("""
@@ -840,6 +824,22 @@ if logged_in:
             style={"width": "100%", "height": "100%", "objectFit": "cover", "borderRadius": "10px"},
         ),
     )
+
+    # ── GPS untuk email darurat — cuma diminta kalau memang ada tujuan emailnya
+    # Lewat komponen sendiri (components/geolocation), BUKAN dengan mengganti
+    # URL halaman seperti dulu. Streamlit 1.17 menyusun alamat iframe komponen
+    # kamera dengan menyertakan URL halaman saat ini (`streamlitUrl`), jadi tiap
+    # kali URL berubah, iframe kamera dimuat ulang dan koneksi WebRTC-nya putus.
+    # Itulah sebabnya dulu akun login (yang punya email tujuan) selalu gagal
+    # START, sementara mode tamu (tanpa pelacak lokasi) jalan normal.
+    #
+    # Sengaja dirender SETELAH webrtc_streamer: elemen Streamlit dikenali dari
+    # urutannya, dan komponen yang muncul/hilang di ATAS kamera akan menggeser
+    # posisi kamera sehingga iframe-nya dibuat ulang.
+    if recipient_emails:
+        maps_link = geolocation_component(key="geolocation", default=None)
+        if maps_link:
+            video_handler.location_link = maps_link
 
     # ── Auto-start saat kamera ON, auto-save saat kamera OFF ─────────────────
     # `playing` bisa False sesaat walau kamera sebenarnya masih jalan (WebRTC

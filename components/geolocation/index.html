@@ -1,0 +1,66 @@
+<!doctype html>
+<html>
+<body style="margin:0">
+<script>
+// Komponen Streamlit dua arah yang paling minimal: ambil lokasi GPS browser
+// lalu kirim ke Python lewat setComponentValue. Ditulis langsung dengan
+// protokol pesan komponen Streamlit, jadi tidak butuh npm / build step.
+//
+// Dulu lokasi dikirim dengan mengganti URL halaman (?loc=...). Itu yang bikin
+// kamera gagal START untuk akun login: Streamlit 1.17 menyusun alamat iframe
+// komponen kamera dengan menyertakan URL halaman saat ini, jadi tiap URL
+// berubah, iframe kamera dimuat ulang dan koneksi WebRTC-nya ikut putus.
+
+function send(type, data) {
+  window.parent.postMessage(Object.assign({ isStreamlitMessage: true, type: type }, data), "*");
+}
+
+// Tiap kiriman memicu satu rerun halaman, jadi dibatasi: kirim posisi
+// pertama secepatnya, setelah itu paling sering 30 detik sekali dan hanya
+// kalau sudah berpindah >= 100 m. Untuk email darurat, lokasi yang
+// tertinggal paling lama 30 detik masih cukup.
+const MIN_INTERVAL_MS = 30000;
+const MIN_DISTANCE_M = 100;
+let last = null;
+let lastSentAt = 0;
+
+function distanceM(a, b) {
+  const R = 6371000, rad = Math.PI / 180;
+  const dLat = (b.lat - a.lat) * rad, dLon = (b.lon - a.lon) * rad;
+  const h = Math.sin(dLat / 2) ** 2 +
+            Math.cos(a.lat * rad) * Math.cos(b.lat * rad) * Math.sin(dLon / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(h));
+}
+
+function onPosition(pos) {
+  const cur = { lat: pos.coords.latitude, lon: pos.coords.longitude };
+  const now = Date.now();
+  if (last && (now - lastSentAt < MIN_INTERVAL_MS || distanceM(last, cur) < MIN_DISTANCE_M)) return;
+  last = cur;
+  lastSentAt = now;
+  send("streamlit:setComponentValue", {
+    value: "https://www.google.com/maps?q=" + cur.lat + "," + cur.lon,
+    dataType: "json",
+  });
+}
+
+let started = false;
+window.addEventListener("message", function (event) {
+  // Mulai melacak setelah render pertama dari Streamlit — nilai yang dikirim
+  // sebelum komponen dianggap siap bisa diabaikan.
+  if (started || !event.data || event.data.type !== "streamlit:render") return;
+  started = true;
+  send("streamlit:setFrameHeight", { height: 0 });
+  if (navigator.geolocation) {
+    navigator.geolocation.watchPosition(
+      onPosition,
+      function (err) { console.error("Gagal ambil lokasi:", err); },
+      { enableHighAccuracy: true, maximumAge: 10000 }
+    );
+  }
+});
+
+send("streamlit:componentReady", { apiVersion: 1 });
+</script>
+</body>
+</html>
