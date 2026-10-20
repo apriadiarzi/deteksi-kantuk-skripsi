@@ -305,12 +305,33 @@ def start_session(username):
         row = cursor.fetchone()
         return row[0] if row else None
 
-def end_session(session_id, events: list):
-    """
-    Dipanggil saat user klik STOP.
-    Menutup sesi dan push semua event sekaligus ke database.
+# Total per jenis dihitung dari tabel drowsiness_events itu sendiri, bukan dari
+# list yang kebetulan dikirim pemanggil. Dulu total diisi dari list itu — dan
+# end_session() terbukti kadang terpanggil DUA kali untuk sesi yang sama: yang
+# pertama membawa semua kejadian, yang kedua membawa list yang sudah
+# dikosongkan, lalu menimpa totalnya jadi 0. Hasilnya Histori menulis
+# "0 kejadian" padahal daftar kejadiannya berisi 20 (terlihat dari kolom xmin
+# Postgres: baris kejadian dan baris sesi ditulis di dua transaksi berbeda).
+_TOTALS_FROM_EVENTS = '''
+    total_eye_close = (SELECT count(*) FROM drowsiness_events e
+                       WHERE e.session_id = s.id AND e.event_type = 'eye_close'),
+    total_yawn      = (SELECT count(*) FROM drowsiness_events e
+                       WHERE e.session_id = s.id AND e.event_type = 'yawn'),
+    total_head_tilt = (SELECT count(*) FROM drowsiness_events e
+                       WHERE e.session_id = s.id AND e.event_type = 'head_tilt')
+'''
 
-    events = list of dict:
+def save_session_progress(session_id, new_events: list):
+    """
+    Simpan kejadian BARU sesi ini, lalu perbarui waktu selesai, durasi, dan
+    total sesinya. Dipanggil berkala selama sesi berjalan dan sekali lagi saat
+    sesi ditutup — jadi kalau HP mendadak mati atau aplikasinya ditutup, data
+    sampai simpanan terakhir sudah aman di database.
+
+    Aman dipanggil berkali-kali: total dihitung ulang dari database, dan
+    waktu selesai selalu waktu simpanan terakhir.
+
+    new_events = list of dict (cuma yang BELUM pernah disimpan):
         {
             'event_type': 'eye_close' | 'yawn' | 'head_tilt',
             'event_time': '2025-01-01 08:10:20',
@@ -321,41 +342,46 @@ def end_session(session_id, events: list):
         return
 
     end_time = now_wib().strftime('%Y-%m-%d %H:%M:%S')
-    total_eye_close, total_yawn, total_head_tilt = compute_session_totals(events)
 
+    # Semuanya dalam satu transaksi: kejadian baru masuk dan baris sesi
+    # diperbarui bersamaan, atau tidak sama sekali.
     with _db(commit=True) as cursor:
-        # Hitung durasi sesi
-        cursor.execute('SELECT start_time FROM driving_sessions WHERE id=%s', (session_id,))
-        row = cursor.fetchone()
-        duration = 0
-        if row:
-            start_dt = datetime.strptime(row[0], '%Y-%m-%d %H:%M:%S')
-            end_dt   = datetime.strptime(end_time, '%Y-%m-%d %H:%M:%S')
-            duration = int((end_dt - start_dt).total_seconds())
-
-        cursor.execute('''
-            UPDATE driving_sessions
-            SET end_time=%s, duration=%s,
-                total_eye_close=%s, total_yawn=%s, total_head_tilt=%s
-            WHERE id=%s
-        ''', (end_time, duration, total_eye_close, total_yawn, total_head_tilt, session_id))
-
-        # Push semua event sekaligus, bukan satu INSERT per kejadian
-        if events:
+        if new_events:
             cursor.executemany('''
                 INSERT INTO drowsiness_events (session_id, event_type, event_time, duration)
                 VALUES (%s, %s, %s, %s)
-            ''', [(session_id, e['event_type'], e['event_time'], e['duration']) for e in events])
+            ''', [(session_id, e['event_type'], e['event_time'], e['duration']) for e in new_events])
+
+        cursor.execute(f'''
+            UPDATE driving_sessions s
+            SET end_time = %s,
+                duration = EXTRACT(EPOCH FROM (%s::timestamp - s.start_time::timestamp))::int,
+                {_TOTALS_FROM_EVENTS}
+            WHERE s.id = %s
+        ''', (end_time, end_time, session_id))
+
+def end_session(session_id, remaining_events: list):
+    """Dipanggil saat sesi ditutup (STOP / keluar): simpan sisa kejadian yang
+    belum tersimpan lalu perbarui ringkasan sesinya untuk terakhir kali."""
+    save_session_progress(session_id, remaining_events)
 
 
 # ─── Getters untuk halaman Histori ────────────────────────────────────────────
 
 def get_sessions_by_username(username):
     """Ambil semua sesi berkendara milik user, terbaru di atas."""
+    # Total dihitung langsung dari drowsiness_events, bukan dibaca dari kolom
+    # total_* — supaya sesi lama yang kolom totalnya sempat tertimpa 0 (lihat
+    # _TOTALS_FROM_EVENTS) tetap tampil benar tanpa perlu memperbaiki datanya.
     with _db() as cursor:
         cursor.execute('''
             SELECT s.id, s.start_time, s.end_time, s.duration,
-                   s.total_eye_close, s.total_yawn, s.total_head_tilt
+                   (SELECT count(*) FROM drowsiness_events e
+                    WHERE e.session_id = s.id AND e.event_type = 'eye_close'),
+                   (SELECT count(*) FROM drowsiness_events e
+                    WHERE e.session_id = s.id AND e.event_type = 'yawn'),
+                   (SELECT count(*) FROM drowsiness_events e
+                    WHERE e.session_id = s.id AND e.event_type = 'head_tilt')
             FROM driving_sessions s
             JOIN users u ON u.id = s.user_id
             WHERE u.username = %s

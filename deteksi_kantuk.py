@@ -269,8 +269,18 @@ class VideoFrameHandler:
 
         self.facemesh_model = get_mediapipe_app()
 
-        # Buffer event sementara — di-push ke DB saat user klik Stop
+        # Semua kejadian sesi yang sedang berjalan. Disimpan ke database
+        # BERTAHAP selama sesi berjalan (lihat save_progress di halaman), bukan
+        # sekaligus saat STOP — supaya kalau HP mendadak mati, data sampai
+        # simpanan terakhir tidak ikut hilang.
         self.pending_events    = []
+        self.events_saved      = 0     # berapa kejadian di pending_events yang sudah tersimpan
+        self.last_saved_at     = 0.0   # time.time() simpanan terakhir
+        # Penjaga supaya satu sesi cuma ditutup sekali, walau penutupnya
+        # terpanggil dua kali (terbukti terjadi; lihat _TOTALS_FROM_EVENTS di
+        # database.py). Sengaja disimpan di objek ini, bukan di session_state.
+        self.session_lock      = threading.RLock()
+        self.closed_sessions   = set()
         self._eye_event_start  = None
         self._yawn_event_start = None
         self._tilt_event_start = None

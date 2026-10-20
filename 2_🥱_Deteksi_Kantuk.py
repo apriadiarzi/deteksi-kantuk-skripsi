@@ -21,7 +21,7 @@ from deteksi_kantuk import VideoFrameHandler
 from geolocation_component import geolocation_component
 from database import (
     create_db, add_user, check_username_exists, check_login,
-    start_session, end_session, save_otp, verify_otp, get_user_email,
+    start_session, save_session_progress, save_otp, verify_otp, get_user_email,
     resolve_guest_user, compute_session_totals, GUEST_COOKIE_VALUE, GUEST_STORAGE_KEY,
     now_wib, set_session_token, get_username_by_token, clear_session_token,
     AUTH_STORAGE_KEY,
@@ -225,7 +225,7 @@ def flush_pending_auth_storage_write():
         components.html(f"<script>{js}</script>", height=0)
 
 def save_guest_session(session_id, start_time_str, events):
-    """Simpan satu sesi tamu ke localStorage browser (maksimal 10 sesi terbaru)."""
+    """Simpan (atau perbarui) satu sesi tamu di localStorage browser (maksimal 10 sesi terbaru)."""
     end_time_str = now_wib().strftime('%Y-%m-%d %H:%M:%S')
     try:
         start_dt = datetime.strptime(start_time_str, '%Y-%m-%d %H:%M:%S')
@@ -254,13 +254,70 @@ def save_guest_session(session_id, start_time_str, events):
     components.html(f"""
     <script>
     try {{
+        // Sesi yang sama disimpan berulang selama berjalan, jadi ganti entri
+        // lamanya (berdasarkan id), jangan menambah entri baru tiap kali.
+        const sesi = {payload};
         let arr = JSON.parse(localStorage.getItem('{GUEST_STORAGE_KEY}') || '[]');
-        arr.unshift({payload});
+        arr = arr.filter(x => x.id !== sesi.id);
+        arr.unshift(sesi);
         if (arr.length > 10) arr = arr.slice(0, 10);
         localStorage.setItem('{GUEST_STORAGE_KEY}', JSON.stringify(arr));
     }} catch (e) {{ console.error('Gagal simpan histori tamu:', e); }}
     </script>
     """, height=0)
+
+# ── Penyimpanan sesi bertahap ─────────────────────────────────────────────────
+# Dulu semua kejadian baru dikirim ke database saat sesi ditutup (STOP + jeda
+# CAMERA_OFF_GRACE). Kalau HP mendadak mati, aplikasinya ditutup, atau
+# browsernya dihentikan sistem saat pindah ke homescreen, script ini tidak
+# pernah sempat jalan lagi — seluruh isi sesi hilang dan sesinya tercatat
+# tanpa waktu selesai. Sekarang kejadian disimpan begitu muncul (paling lambat
+# satu rerun = 2 detik kemudian), dan ringkasan sesinya diperbarui tiap
+# CHECKPOINT_INTERVAL detik walau tidak ada kejadian baru.
+CHECKPOINT_INTERVAL = 15
+
+def save_progress(handler, session_id, is_guest, guest_start, force=False):
+    """Simpan kejadian yang belum tersimpan + perbarui ringkasan sesi.
+    Mengembalikan False kalau gagal (dicoba lagi di rerun berikutnya)."""
+    with handler.session_lock:
+        if session_id is None or session_id in handler.closed_sessions:
+            return True
+        # Salinan: thread kamera terus menambah ke list aslinya.
+        events = list(handler.pending_events)
+        new_events = events[handler.events_saved:]
+        if not force and not new_events and time.time() - handler.last_saved_at < CHECKPOINT_INTERVAL:
+            return True
+        try:
+            if is_guest:
+                # localStorage tidak punya "tambah baris", jadi sesinya ditulis
+                # ulang utuh (entri lama dengan id yang sama diganti).
+                save_guest_session(session_id, guest_start, events)
+            else:
+                save_session_progress(session_id, new_events)
+        except Exception as e:
+            print(f"Gagal menyimpan progres sesi: {e}")
+            return False
+        handler.events_saved = len(events)
+        handler.last_saved_at = time.time()
+        return True
+
+def close_session(handler, session_id, is_guest, guest_start):
+    """Tutup sesi — SEKALI saja per sesi.
+
+    Mengembalikan jumlah kejadian sesi itu, None kalau sesi ini sudah pernah
+    ditutup (panggilan ganda dilewati), atau False kalau simpanan terakhirnya
+    gagal (sesi dibiarkan terbuka supaya dicoba lagi di rerun berikutnya).
+    """
+    with handler.session_lock:
+        if session_id is None or session_id in handler.closed_sessions:
+            return None
+        if not save_progress(handler, session_id, is_guest, guest_start, force=True):
+            return False
+        handler.closed_sessions.add(session_id)
+        total = len(handler.pending_events)
+        handler.pending_events.clear()
+        handler.events_saved = 0
+        return total
 
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
@@ -685,11 +742,9 @@ if logged_in:
                 # variabel itu baru dibuat jauh di bawah sini, jadi dulu baris
                 # ini selalu NameError dan sesi aktif tidak pernah tersimpan.
                 handler = st.session_state.get("video_handler")
-                pending = handler.pending_events if handler else []
-                if is_guest:
-                    save_guest_session(st.session_state["session_id"], st.session_state.get("guest_session_start"), pending)
-                else:
-                    end_session(st.session_state["session_id"], pending)
+                if handler:
+                    close_session(handler, st.session_state["session_id"], is_guest,
+                                  st.session_state.get("guest_session_start"))
             if not is_guest:
                 clear_session_token(user)
             set_cookie("")
@@ -875,6 +930,8 @@ if logged_in:
         st.session_state["session_id"]    = sid
         st.session_state["is_monitoring"] = True
         video_handler.pending_events.clear()
+        video_handler.events_saved  = 0
+        video_handler.last_saved_at = time.time()
         video_handler._eye_event_start  = None
         video_handler._yawn_event_start = None
         video_handler._tilt_event_start = None
@@ -883,21 +940,26 @@ if logged_in:
     # detik berturut-turut, supaya gangguan sesaat tidak salah dibaca sebagai
     # user menekan STOP.
     elif st.session_state["is_monitoring"] and camera_off_for >= CAMERA_OFF_GRACE:
-        if st.session_state["session_id"] is not None:
-            if is_guest:
-                save_guest_session(st.session_state["session_id"], st.session_state.get("guest_session_start"), video_handler.pending_events)
-            else:
-                end_session(st.session_state["session_id"], video_handler.pending_events)
-            total = len(video_handler.pending_events)
+        total = close_session(video_handler, st.session_state["session_id"], is_guest,
+                              st.session_state.get("guest_session_start"))
+        # False = simpanan terakhir gagal: sesi dibiarkan terbuka dan
+        # penutupan dicoba lagi di rerun berikutnya. None = sesi ini ternyata
+        # sudah ditutup oleh panggilan sebelumnya — cukup rapikan statusnya.
+        if total is not False:
             st.session_state["is_monitoring"] = False
             st.session_state["session_id"]    = None
             st.session_state["camera_off_since"] = None
-            video_handler.pending_events.clear()
-            # JANGAN panggil st.experimental_rerun() di sini. Untuk mode tamu,
-            # save_guest_session() di atas menulis ke localStorage lewat
-            # components.html, dan rerun akan memotong render sebelum elemen
-            # itu sampai ke browser — sesinya jadi tidak pernah tersimpan.
-            st.success(f"Sesi tersimpan! {total} kejadian kantuk tercatat.")
+            if total is not None:
+                # JANGAN panggil st.experimental_rerun() di sini. Untuk mode
+                # tamu, save_guest_session() menulis ke localStorage lewat
+                # components.html, dan rerun akan memotong render sebelum
+                # elemen itu sampai ke browser — sesinya jadi tidak tersimpan.
+                st.success(f"Sesi tersimpan! {total} kejadian kantuk tercatat.")
+
+    # Simpan bertahap selama sesi berjalan — lihat save_progress().
+    if st.session_state["is_monitoring"]:
+        save_progress(video_handler, st.session_state["session_id"], is_guest,
+                      st.session_state.get("guest_session_start"))
 
     # ── Info status ───────────────────────────────────────────────────────────
     # Rerun berkala selama kamera/sesi hidup: event kantuk masuk dari thread
