@@ -1,0 +1,7 @@
+Citra;Ukuran (piksel);EAR kiri;EAR kanan;EAR rata-rata;MAR;Sudut;Kesimpulan sistem
+test-open-eyes.jpg (mata terbuka);240 x 360;0,335;0,321;0,328;0,46;1,5 derajat;Normal
+test-open-eyes2.jpg (mata terbuka);500 x 750;0,302;0,282;0,292;0,323;4,0 derajat;Normal
+test-close-eyes.jpg (mata tertutup);275 x 183;0,199;0,206;0,203;0,417;-2,4 derajat;Mata tertutup
+test-close-eyes2.jpg (mata tertutup);550 x 400;0,177;0,193;0,185;0,308;1,1 derajat;Mata tertutup
+test-yawning.jpg (menguap);600 x 480;0,153;0,169;0,161;1,026;-3,9 derajat;Menguap dan mata tertutup
+test-head-tilt.jpeg (kepala miring);650 x 366;0,262;0,248;0,255;0,493;40,3 derajat;Kepala miring

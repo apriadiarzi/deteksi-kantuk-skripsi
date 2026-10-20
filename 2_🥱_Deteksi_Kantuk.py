@@ -19,6 +19,7 @@ from streamlit_autorefresh import st_autorefresh
 
 from audio_handling import AudioFrameHandler
 from deteksi_kantuk import VideoFrameHandler
+from geolocation_component import geolocation_component
 from database import (
     create_db, add_user, check_username_exists, check_login,
     start_session, end_session, save_otp, verify_otp, get_user_email,
@@ -38,12 +39,6 @@ create_db()
 # ── Konstanta email pengirim ──────────────────────────────────────────────────
 EMAIL_SENDER   = "deteksikantuk@gmail.com"
 EMAIL_PASSWORD = config('EMAIL_PASSWORD')
-
-# Komponen pelacak lokasi untuk email darurat — lihat components/geolocation.
-geolocation_component = components.declare_component(
-    "geolocation",
-    path=os.path.join(os.path.dirname(os.path.abspath(__file__)), "components", "geolocation"),
-)
 
 # Berapa detik kamera harus benar-benar mati sebelum sesi dianggap selesai.
 # Jangan dibikin terlalu pendek: kalau koneksi WebRTC sempat goyang sebentar,
