@@ -3,7 +3,6 @@ import re
 import av
 import random
 import string
-import threading
 import traceback
 import smtplib
 from email.mime.text import MIMEText
@@ -61,22 +60,10 @@ METERED_API_KEY  = config('METERED_API_KEY', default='')
 
 STUN_ONLY = [{"urls": ["stun:stun.l.google.com:19302"]}]
 
-# Jaring pengaman kalau API Metered lagi tidak bisa dihubungi: TURN publik
-# gratis dari Open Relay Project (kredensialnya memang statis dan terbuka untuk
-# umum, jadi tidak masalah ada di dalam git). Ini SEKADAR cadangan — tidak ada
-# jaminan uptime maupun kapasitas, jadi jangan diandalkan untuk sidang/demo.
-# Yang diandalkan tetap kredensial Metered milik sendiri di bawah.
-OPEN_RELAY_FALLBACK = STUN_ONLY + [
-    {
-        "urls": [
-            "turn:openrelay.metered.ca:80",
-            "turn:openrelay.metered.ca:443",
-            "turns:openrelay.metered.ca:443?transport=tcp",
-        ],
-        "username": "openrelayproject",
-        "credential": "openrelayproject",
-    }
-]
+# Dulu ada cadangan TURN publik gratis (Open Relay, kredensial
+# "openrelayproject") kalau API Metered gagal. Sudah dibuang: diuji di Chrome,
+# keempat alamatnya tidak lagi memberi kandidat relay sama sekali, dan cuma
+# menahan START 21–40 detik sebelum tetap gagal.
 
 def build_ice_servers():
     """Ambil daftar server ICE (STUN + TURN) dari Metered.
@@ -86,7 +73,7 @@ def build_ice_servers():
     halaman ini di-rerun tiap detik saat monitoring aktif — tidak perlu
     menembak API tiap rerun.
 
-    Kalau pengambilan kredensial gagal, hasil cadangannya IKUT di-cache (dengan
+    Kalau pengambilan kredensial gagal, hasil cadangannya (STUN saja) IKUT di-cache (dengan
     umur pendek). Tanpa itu, tiap rerun akan menembak API yang sedang bermasalah
     lagi dan app-nya ikut menggantung sampai timeout — padahal saat monitoring
     aktif rerun-nya tiap detik.
@@ -115,34 +102,42 @@ def build_ice_servers():
             # kalau diteruskan ke rtc_configuration, WebRTC-nya justru rusak.
             raise ValueError(f"format respons tidak dikenal: {servers!r}")
     except Exception as e:
-        # Jangan sampai app mati cuma karena TURN tidak terjangkau. Pakai TURN
-        # publik sebagai cadangan; di lokal STUN di dalamnya saja sudah cukup.
-        # TTL-nya sengaja pendek supaya kredensial Metered dicoba lagi sebentar
-        # kemudian begitu API-nya pulih.
-        print(f"Gagal ambil kredensial TURN: {e} — sementara pakai Open Relay")
-        return _cache(OPEN_RELAY_FALLBACK, 60)
+        # Jangan sampai app mati cuma karena TURN tidak terjangkau: turun ke
+        # STUN saja. Di lokal itu sudah cukup; di cloud kamera tidak akan
+        # tersambung, tapi gagalnya cepat, bukan menggantung. TTL-nya sengaja
+        # pendek supaya kredensial Metered dicoba lagi begitu API-nya pulih.
+        print(f"Gagal ambil kredensial TURN: {e} — sementara STUN saja")
+        return _cache(STUN_ONLY, 60)
 
     return _cache(servers, 1800)
 
-# ── Pangkas daftar TURN ───────────────────────────────────────────────────────
-# Frontend streamlit-webrtc baru mengirim offer setelah SEMUA alamat TURN
-# selesai merespons (menunggu iceGatheringState "complete"), tanpa batas waktu.
-# Metered memberi 5 alamat, dan cukup satu port yang diblokir jaringan
-# (umum di jaringan seluler / Wi-Fi kampus) untuk membuat START tertahan
-# sampai browser menyerah pada alamat itu. Dua jalur sudah menutup semua
-# kondisi: TURN lewat UDP (jalur tercepat) dan TURN lewat TLS port 443 (lolos
-# hampir semua firewall, karena terlihat seperti HTTPS biasa).
+# ── Pangkas daftar TURN untuk BROWSER ─────────────────────────────────────────
+# Frontend streamlit-webrtc baru mengirim offer setelah browser selesai
+# menghubungi SEMUA server STUN/TURN (menunggu iceGatheringState "complete"),
+# tanpa batas waktu. Diukur di Chrome: TURN lewat UDP memberi kandidat relay
+# dalam ~1,3 detik, tapi "complete"-nya baru datang setelah ~40 detik — satu
+# permintaan UDP tidak pernah dijawab dan Chrome baru menyerah setelah batas
+# waktu bawaannya. Itulah 40 dari 42 detik waktu START.
+#
+#   STUN + TURN UDP:80 + TURN TLS:443   → 39,97 s
+#   STUN + TURN TCP:80 + TURN TLS:443   →  0,29 s   (kandidatnya sama lengkap)
+#
+# Jadi browser cuma diberi TURN lewat TCP (port 80) dan TLS (port 443, lolos
+# hampir semua firewall). Harganya: di sinyal jelek, TCP menunggu paket yang
+# hilang dikirim ulang, jadi video bisa sesekali tersendat — jauh lebih bisa
+# diterima daripada menunggu 40 detik tiap START. Hasil deteksinya sendiri
+# tidak berubah; frame yang sampai justru selalu utuh.
 def trim_turn_urls(servers):
-    trimmed, have_udp, have_tls = [], False, False
+    trimmed, have_tcp, have_tls = [], False, False
     for s in servers:
         urls = s["urls"] if isinstance(s["urls"], list) else [s["urls"]]
         kept = []
         for u in urls:
             if u.startswith("stun:"):
                 kept.append(u)
-            elif u.startswith("turn:") and "transport=tcp" not in u and not have_udp:
+            elif u.startswith("turn:") and "transport=tcp" in u and not have_tcp:
                 kept.append(u)
-                have_udp = True
+                have_tcp = True
             elif u.startswith("turns:") and not have_tls:
                 kept.append(u)
                 have_tls = True
@@ -744,16 +739,22 @@ if logged_in:
 
     video_handler = st.session_state["video_handler"]
     video_handler.email_recipients = recipient_emails
-    audio_handler = AudioFrameHandler(sound_file_path=alarm_file_path)
-    lock = threading.Lock()
-    shared_state = {"play_alarm": False}
+    # Handler audio disimpan di session_state, BUKAN dibuat ulang tiap rerun.
+    # Dulu dibuat baru di tiap rerun — dan selama kamera aktif halaman di-rerun
+    # tiap 2 detik — sehingga posisi klip alarm ter-reset: bunyinya terpotong
+    # lalu mulai lagi dari awal tiap 2 detik. Itulah suara yang patah-patah.
+    # Penanda alarm-nya (`playing`) ikut disimpan di objek yang sama; dulu
+    # disimpan di dict yang juga dibuat ulang kosong tiap rerun.
+    if "audio_handler" not in st.session_state:
+        st.session_state["audio_handler"] = AudioFrameHandler(sound_file_path=alarm_file_path)
+        st.session_state["audio_handler"].playing = False
+    audio_handler = st.session_state["audio_handler"]
 
     def video_frame_callback(frame: av.VideoFrame):
         try:
             img = frame.to_ndarray(format="bgr24")
             img, play_alarm = video_handler.process(img, thresholds)
-            with lock:
-                shared_state["play_alarm"] = play_alarm
+            audio_handler.playing = play_alarm
             return av.VideoFrame.from_ndarray(img, format="bgr24")
         except Exception:
             # Callback ini jalan di thread kamera. Kalau error-nya dibiarkan
@@ -771,17 +772,24 @@ if logged_in:
             video_handler.last_error = True
             return frame
 
-    def audio_frame_callback(frame: av.AudioFrame):
-        with lock:
-            play_alarm = shared_state["play_alarm"]
-        return audio_handler.process(frame, play_sound=play_alarm)
-
     # Key sengaja TETAP, bukan dinamis. Sempat dibuat berubah tiap sesi selesai
     # untuk mengakali START yang kadang macet, tapi itu menyisakan instance
     # komponen lama tiap siklus STOP→START — dugaan kuat penyebab kamera makin
     # sering gagal nyambung setelah dipakai beberapa kali.
-    ice_servers = trim_turn_urls(build_ice_servers())
-    use_ice_servers_on_server(ice_servers)
+    # Server memakai daftar lengkap (termasuk TURN UDP — jalur paling ringan
+    # untuk media, dan pengumpulan kandidat di server tidak menahan browser);
+    # browser memakai daftar yang sudah dipangkas, lihat trim_turn_urls().
+    raw_ice_servers = build_ice_servers()
+    use_ice_servers_on_server(raw_ice_servers)
+    ice_servers = trim_turn_urls(raw_ice_servers)
+    def audio_frame_callback(frame: av.AudioFrame):
+        # Alarm dibunyikan dengan MENGGANTI isi frame mic yang masuk. Sempat
+        # dicoba track audio sendiri lewat `source_audio_track`, lalu dibatalkan:
+        # dengan cara itu track mic tidak dibaca siapa pun, padahal aiortc terus
+        # menumpuk frame mic hasil decode di antrean tanpa batas — 50 frame per
+        # detik, bisa lebih dari 1 GB dalam perjalanan 2 jam.
+        return audio_handler.process(frame, play_sound=audio_handler.playing)
+
     ctx = webrtc_streamer(
         key="drowsiness-detection",
         video_frame_callback=video_frame_callback,

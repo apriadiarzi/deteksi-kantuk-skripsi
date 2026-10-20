@@ -479,8 +479,13 @@ class VideoFrameHandler:
                 self.state_tracker["YAWN_TIME"]       += yawn_end - self.state_tracker["YAWN_start_time"]
                 self.state_tracker["YAWN_start_time"]  = yawn_end
                 self.state_tracker["is_yawning"]       = True
-                self.state_tracker["yawn_alarm"]       = True
-                plot_text(frame, "MENGUAP TERDETEKSI!", WARN_YAWN_pos, self.ORANGE)
+                # Alarm baru menyala setelah mulut terbuka selama WAIT_TIME,
+                # sama seperti mata. Dulu langsung menyala begitu MAR lewat
+                # ambang di SATU frame saja — bicara sebentar pun membunyikan
+                # alarm.
+                if self.state_tracker["YAWN_TIME"] >= thresholds["WAIT_TIME"]:
+                    self.state_tracker["yawn_alarm"] = True
+                    plot_text(frame, "MENGUAP TERDETEKSI!", WARN_YAWN_pos, self.ORANGE)
 
                 if not self.state_tracker["yawn_message_sent"] and self.state_tracker["YAWN_TIME"] >= 3:
                     self.request_email_alert(
@@ -519,8 +524,12 @@ class VideoFrameHandler:
                 self.state_tracker["TILT_TIME"]       += tilt_end - self.state_tracker["TILT_start_time"]
                 self.state_tracker["TILT_start_time"]  = tilt_end
                 self.state_tracker["is_tilting"]       = True
-                self.state_tracker["tilt_alarm"]       = True
-                plot_text(frame, "KEPALA MIRING!", WARN_TILT_pos, self.YELLOW)
+                # Sama seperti menguap: tunggu WAIT_TIME dulu, supaya kepala
+                # yang miring sesaat (menoleh ke spion, dsb.) tidak membunyikan
+                # alarm.
+                if self.state_tracker["TILT_TIME"] >= thresholds["WAIT_TIME"]:
+                    self.state_tracker["tilt_alarm"] = True
+                    plot_text(frame, "KEPALA MIRING!", WARN_TILT_pos, self.YELLOW)
 
                 if not self.state_tracker["tilt_message_sent"] and self.state_tracker["TILT_TIME"] >= 5:
                     self.request_email_alert(
