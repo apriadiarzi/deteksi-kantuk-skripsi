@@ -228,7 +228,7 @@ def enhance_low_light(frame):
 # kejadian lain di dalam jendela tidak dikirim, tapi DIHITUNG, lalu dilaporkan
 # sebagai satu email ringkasan begitu jendelanya habis. Jadi penerima tetap
 # tahu pengemudinya berulang kali mengantuk — tanpa kotak masuknya dibanjiri.
-EMAIL_COOLDOWN_SECONDS = 5 * 60
+EMAIL_COOLDOWN_SECONDS = 2 * 60
 
 EVENT_LABELS = {
     "eye_close": "mata tertutup",
