@@ -65,20 +65,33 @@ def calculate_avg_ear(landmarks, left_eye_idxs, right_eye_idxs, image_w, image_h
     return Avg_EAR, (left_lm_coordinates, right_lm_coordinates)
 
 # ─── MAR ──────────────────────────────────────────────────────────────────────
+# Titik dan rumus mengikuti Florez et al. (2024), Gambar 8 dan Persamaan (1):
+#
+#    P2(39)    P3(0)    P4(269)
+# P1(61)                      P5(291)
+#    P8(181)   P7(17)   P6(405)
+#
+# MAR = (||P2-P8|| + ||P3-P7|| + ||P4-P6||) / (3 * ||P1-P5||)
+#
+# Tiap pasangan titik atas–bawah segaris tegak, jadi pembilangnya tiga
+# tinggi mulut dan dibagi 3× lebar = rata-rata tinggi / lebar.
+#
+# Versi sebelumnya memakai landmark 146 dan 375 untuk bibir bawah — dua titik
+# yang persis bersebelahan dengan sudut mulut (cuma ~2 px dari 61 dan 291).
+# Dua dari tiga "tinggi"-nya jadi mengukur bibir atas ke POJOK mulut, yang
+# nyaris tidak bergerak saat menguap. Diukur pada gambar uji di repo:
+#   rumus lama  : mulut tertutup 0,31–0,44, menguap 0,91
+#   rumus ini   : mulut tertutup 0,25–0,35, menguap 0,80
+# Ambang 0,6 kini berada tepat di tengah keduanya, dan mulut tertutup yang
+# terlihat lebih "tinggi" karena kepala menoleh (lebar mulut menyusut di
+# gambar) tidak lagi semudah dulu melewati ambang.
+#
 # Threshold default 0.6 — di antara 0.5 (Albadawi et al., 2023) dan 0.65
 # (Baul et al., 2025, MediaPipe Face Mesh). Catatan: rumus MAR tiap paper
 # memakai titik bibir yang berbeda, jadi angkanya tidak bisa dibandingkan
 # persis satu-satu — ini sebabnya threshold dibuat bisa diatur lewat slider.
-#
-#        P3(0)
-#   P2(39)   P5(269)
-# P1(61)         P4(291)
-#   P8(146)  P6(375)
-#        P7(17)
-#
-# MAR = (||P2-P8|| + ||P3-P7|| + ||P5-P6||) / (2 * ||P1-P4||)
 
-MOUTH_IDXS = [61, 39, 0, 291, 269, 375, 17, 146]
+MOUTH_IDXS = [61, 39, 0, 269, 291, 405, 17, 181]  # P1 … P8
 
 # Minimum durasi event agar masuk database (detik). Fungsinya menyaring noise,
 # bukan mendeteksi — jadi sengaja dibuat lebih panjang dari angka referensi.
@@ -105,9 +118,9 @@ def get_mar(landmarks, mouth_idxs, frame_width, frame_height):
 
         P2_P8 = distance(coords[1], coords[7])
         P3_P7 = distance(coords[2], coords[6])
-        P5_P6 = distance(coords[4], coords[5])
-        P1_P4 = distance(coords[0], coords[3])
-        mar = (P2_P8 + P3_P7 + P5_P6) / (2.0 * P1_P4)
+        P4_P6 = distance(coords[3], coords[5])
+        P1_P5 = distance(coords[0], coords[4])
+        mar = (P2_P8 + P3_P7 + P4_P6) / (3.0 * P1_P5)
     except:
         mar = 0.0
         coords = None
