@@ -18,6 +18,7 @@ from streamlit_autorefresh import st_autorefresh
 
 from audio_handling import AudioFrameHandler
 from deteksi_kantuk import VideoFrameHandler
+from diagnostik import DIAGNOSTIK_AKTIF, FrameTimer
 from geolocation_component import geolocation_component
 from database import (
     create_db, add_user, check_username_exists, check_login,
@@ -805,12 +806,25 @@ if logged_in:
         st.session_state["audio_handler"].playing = False
     audio_handler = st.session_state["audio_handler"]
 
+    # Pengukuran waktu proses per frame (mode DIAGNOSTIK saja, lihat
+    # diagnostik.py). Disimpan di session_state supaya bertahan lintas rerun.
+    if "frame_timer" not in st.session_state:
+        st.session_state["frame_timer"] = FrameTimer()
+    frame_timer = st.session_state["frame_timer"]
+
     def video_frame_callback(frame: av.VideoFrame):
+        # Diukur dari frame diterima sampai frame hasil siap dikirim balik:
+        # konversi ke array, CLAHE, FaceMesh, EAR/MAR/kemiringan, logika alarm
+        # & email, gambar overlay, konversi balik ke VideoFrame.
+        t0 = time.perf_counter() if DIAGNOSTIK_AKTIF else None
         try:
             img = frame.to_ndarray(format="bgr24")
             img, play_alarm = video_handler.process(img, thresholds)
             audio_handler.playing = play_alarm
-            return av.VideoFrame.from_ndarray(img, format="bgr24")
+            out = av.VideoFrame.from_ndarray(img, format="bgr24")
+            if t0 is not None:
+                frame_timer.record((time.perf_counter() - t0) * 1000)
+            return out
         except Exception:
             # Callback ini jalan di thread kamera. Kalau error-nya dibiarkan
             # lolos, aiortc menelannya diam-diam: frame berhenti dikirim,
@@ -935,6 +949,7 @@ if logged_in:
         video_handler._eye_event_start  = None
         video_handler._yawn_event_start = None
         video_handler._tilt_event_start = None
+        frame_timer.reset()  # statistik diagnostik per sesi kamera
 
     # Sesi baru ditutup kalau kamera benar-benar mati selama CAMERA_OFF_GRACE
     # detik berturut-turut, supaya gangguan sesaat tidak salah dibaca sebagai
@@ -985,6 +1000,37 @@ if logged_in:
 
     if getattr(video_handler, "last_error", None):
         st.warning("Ada gangguan saat memproses frame kamera. Detailnya tercatat di log aplikasi.")
+
+    # ── Diagnostik (hanya kalau DIAGNOSTIK=1) ─────────────────────────────────
+    # Dirender SETELAH komponen kamera supaya tidak menggeser posisinya.
+    if DIAGNOSTIK_AKTIF:
+        with st.expander("Diagnostik", expanded=False):
+            s = frame_timer.summary()
+            if s is None:
+                st.caption(f"Belum ada data. {FrameTimer.WARMUP_FRAMES} frame pertama setelah START "
+                           "diabaikan sebagai pemanasan.")
+            else:
+                k = lambda x: f"{x:.1f}".replace(".", ",")
+                st.markdown(
+                    f"**Waktu proses satu frame** (sesi kamera ini, {s['diabaikan']} frame pemanasan diabaikan)\n\n"
+                    f"| Frame terukur | Rata-rata | Median | P95 | Min | Maks |\n"
+                    f"|---:|---:|---:|---:|---:|---:|\n"
+                    f"| {s['n']} | {k(s['rata_rata'])} ms | {k(s['median'])} ms | {k(s['p95'])} ms "
+                    f"| {k(s['min'])} ms | {k(s['maks'])} ms |"
+                )
+
+            st.markdown("**Handshake & query database** (diukur dari server ini)")
+            if st.button("Ukur database (10x)", key="diag_ukur_db"):
+                # Diimpor di sini saja: modul ini tidak dimuat sama sekali
+                # kalau tombolnya tidak pernah ditekan.
+                import ukur_db
+                with st.spinner("Mengukur 10 percobaan..."):
+                    try:
+                        st.session_state["diag_db_hasil"] = ukur_db.format_tabel(ukur_db.ukur(10))
+                    except Exception as e:
+                        st.session_state["diag_db_hasil"] = "Gagal mengukur: " + ukur_db._aman(e)
+            if st.session_state.get("diag_db_hasil"):
+                st.code(st.session_state["diag_db_hasil"], language=None)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # BELUM LOGIN
