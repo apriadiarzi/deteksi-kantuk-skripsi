@@ -19,14 +19,7 @@ def get_mediapipe_app(
     min_detection_confidence=0.5,
     min_tracking_confidence=0.5,
 ):
-    """Bangun FaceMesh.
-
-    refine_landmarks=False disengaja. Flag itu menyalakan model iris TAMBAHAN
-    yang jalan tiap frame (landmark 468-477), sementara semua indeks yang
-    dipakai di sini — mata, mulut, kemiringan kepala — landmark standar semua.
-    Jadi di versi sebelumnya model itu dihitung tiap frame untuk hasil yang
-    tidak pernah dibaca; mahal sekali di CPU 1-core Streamlit Cloud.
-    """
+    """Bangun FaceMesh (tanpa model iris, karena landmark iris tidak dipakai)."""
     face_mesh = mp.solutions.face_mesh.FaceMesh(
         max_num_faces=max_num_faces,
         refine_landmarks=refine_landmarks,
@@ -65,44 +58,11 @@ def calculate_avg_ear(landmarks, left_eye_idxs, right_eye_idxs, image_w, image_h
     return Avg_EAR, (left_lm_coordinates, right_lm_coordinates)
 
 # ─── MAR ──────────────────────────────────────────────────────────────────────
-# Titik dan rumus mengikuti Florez et al. (2024), Gambar 8 dan Persamaan (1):
-#
-#    P2(39)    P3(0)    P4(269)
-# P1(61)                      P5(291)
-#    P8(181)   P7(17)   P6(405)
-#
-# MAR = (||P2-P8|| + ||P3-P7|| + ||P4-P6||) / (3 * ||P1-P5||)
-#
-# Tiap pasangan titik atas–bawah segaris tegak, jadi pembilangnya tiga
-# tinggi mulut dan dibagi 3× lebar = rata-rata tinggi / lebar.
-#
-# Versi sebelumnya memakai landmark 146 dan 375 untuk bibir bawah — dua titik
-# yang persis bersebelahan dengan sudut mulut (cuma ~2 px dari 61 dan 291).
-# Dua dari tiga "tinggi"-nya jadi mengukur bibir atas ke POJOK mulut, yang
-# nyaris tidak bergerak saat menguap. Diukur pada gambar uji di repo:
-#   rumus lama  : mulut tertutup 0,31–0,44, menguap 0,91
-#   rumus ini   : mulut tertutup 0,25–0,35, menguap 0,80
-# Ambang 0,6 kini berada tepat di tengah keduanya, dan mulut tertutup yang
-# terlihat lebih "tinggi" karena kepala menoleh (lebar mulut menyusut di
-# gambar) tidak lagi semudah dulu melewati ambang.
-#
-# Threshold default 0.6 — di antara 0.5 (Albadawi et al., 2023) dan 0.65
-# (Baul et al., 2025, MediaPipe Face Mesh). Catatan: rumus MAR tiap paper
-# memakai titik bibir yang berbeda, jadi angkanya tidak bisa dibandingkan
-# persis satu-satu — ini sebabnya threshold dibuat bisa diatur lewat slider.
+# MAR Florez et al. (2024): (|P2-P8| + |P3-P7| + |P4-P6|) / (3 x |P1-P5|), P1..P8 = 61, 39, 0, 269, 291, 405, 17, 181.
 
 MOUTH_IDXS = [61, 39, 0, 269, 291, 405, 17, 181]  # P1 … P8
 
-# Minimum durasi event agar masuk database (detik). Fungsinya menyaring noise,
-# bukan mendeteksi — jadi sengaja dibuat lebih panjang dari angka referensi.
-#   Mata  : kedipan normal 100–400 ms, kedipan mengantuk ≥ 0,4–0,5 detik
-#           (Albadawi et al., 2023). 1 detik pasti membuang kedipan normal.
-#   Menguap: satu kali menguap berlangsung sekitar 4–6 detik (Albadawi et al.,
-#           2023); Florez et al. (2024) mensyaratkan MAR terlampaui ≥ 5 detik.
-#           1 detik cukup untuk tetap menangkap seluruh kejadian menguap.
-#   Kepala: tidak ada referensi durasi; ditetapkan sendiri, sedikit lebih lama
-#           dari mata/mulut karena kepala lebih sering bergerak sesaat
-#           (menoleh ke spion, melihat dashboard).
+# Durasi minimal kejadian (detik) agar disimpan ke database, untuk menyaring noise.
 MIN_DURATION_EYE  = 1.0
 MIN_DURATION_YAWN = 1.0
 MIN_DURATION_TILT = 1.5
@@ -127,29 +87,13 @@ def get_mar(landmarks, mouth_idxs, frame_width, frame_height):
     return mar, coords
 
 # ─── Head Tilt (kemiringan kepala) ────────────────────────────────────────────
-# Referensi threshold:
-#   Baul et al. (2025) "Development of a Real-time Driver's Drowsiness
-#   Detection System Using MediaPipe Face Mesh" — memakai ±20°, dengan
-#   MediaPipe Face Mesh yang sama seperti sistem ini.
-#   Default threshold: 20°
-#
-#   Sugeng & Nizar (2023) memakai batas yang jauh lebih longgar (> 45°)
-#   dengan metode berbeda (garis dahi–dagu, bukan garis antar-telinga).
-#
-# Metode: hitung sudut kemiringan dari garis antara dua tragus telinga
-#   Left ear tragus  = landmark 234
-#   Right ear tragus = landmark 454
-#   Sudut dihitung dari garis horizontal (atan2)
+# Sudut kepala dari garis tragus telinga kiri (234) ke kanan (454); ambang 20 derajat (Baul et al., 2025).
 
 EAR_LEFT_TRAGUS  = 234
 EAR_RIGHT_TRAGUS = 454
 
 def get_head_tilt_angle(landmarks, frame_width, frame_height):
-    """
-    Hitung sudut kemiringan kepala dalam derajat.
-    0° = tegak lurus, positif = miring kanan, negatif = miring kiri.
-    Referensi: Baul et al. (2025)
-    """
+    """Sudut kemiringan kepala dalam derajat (positif = miring kanan, negatif = miring kiri)."""
     try:
         left  = landmarks[EAR_LEFT_TRAGUS]
         right = landmarks[EAR_RIGHT_TRAGUS]
@@ -197,10 +141,7 @@ def plot_head_tilt(frame, left_pt, right_pt, angle, color):
     return frame
 
 def plot_text(image, text, origin, color, font=cv2.FONT_HERSHEY_SIMPLEX, fntScale=None, thickness=None):
-    # Ukuran huruf mengikuti lebar frame, bukan dipatok tetap. WebRTC
-    # menurunkan resolusi sendiri saat CPU/bandwidth tertekan, dan ukuran tetap
-    # bikin tulisannya menutupi wajah begitu frame-nya mengecil. Dikalibrasi
-    # supaya frame selebar 640px tetap terlihat seperti sebelumnya (0.8).
+    # Ukuran huruf mengikuti lebar frame (0.8 untuk frame 640 px).
     if fntScale is None:
         fntScale = max(0.35, min(1.0, image.shape[1] / 640 * 0.8))
     if thickness is None:
@@ -209,38 +150,20 @@ def plot_text(image, text, origin, color, font=cv2.FONT_HERSHEY_SIMPLEX, fntScal
     return image
 
 # ─── Low-light Enhancement ────────────────────────────────────────────────────
-# Referensi: Aprilia & Fitrianah (2025) "Automatic drowsiness detection system
-# to reduce road accident risks" — CLAHE untuk deteksi kantuk di kondisi minim
-# cahaya. Mereka memakai clip limit 2.0 dengan tile 8×8; di sini clip limit-nya
-# 3.0 (kontras lebih kuat), tile-nya sama.
+# CLAHE untuk kondisi minim cahaya (Aprilia & Fitrianah, 2025).
 
-# Objek CLAHE dibuat sekali di sini, bukan di dalam enhance_low_light().
-# Parameternya tidak pernah berubah. Diukur, penghematannya ternyata kecil
-# sekali (createCLAHE memang murah) — ini dibiarkan karena lebih rapi, bukan
-# karena kencang.
-#
-# Sempat dicoba MELEWATI CLAHE untuk frame yang sudah terang, lalu dibatalkan:
-# seluruh enhance_low_light() cuma ~1ms dari ~5ms per frame, jadi tidak ada
-# yang berarti untuk dihemat — sementara melewatinya akan mengubah metodologi
-# CLAHE yang dipakai di skripsi, tergantung terang-gelapnya ruangan.
+# Objek CLAHE dibuat sekali dan dipakai ulang untuk setiap frame.
 _CLAHE = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
 
 def enhance_low_light(frame):
-    """
-    Tingkatkan kecerahan frame di kondisi minim cahaya menggunakan CLAHE.
-    Hanya channel luminance (Y) yang diproses agar warna tidak berubah drastis.
-    """
+    """Tingkatkan kontras frame minim cahaya dengan CLAHE pada kanal luminance (Y)."""
     yuv = cv2.cvtColor(frame, cv2.COLOR_BGR2YUV)
     yuv[:, :, 0] = _CLAHE.apply(yuv[:, :, 0])
     return cv2.cvtColor(yuv, cv2.COLOR_YUV2BGR)
 
 
 # ─── Pembatasan email darurat ─────────────────────────────────────────────────
-# Paling banyak SATU email per jendela ini, untuk semua jenis kejadian sekaligus
-# (mata tertutup, menguap, kepala miring). Kejadian pertama langsung dikirim;
-# kejadian lain di dalam jendela tidak dikirim, tapi DIHITUNG, lalu dilaporkan
-# sebagai satu email ringkasan begitu jendelanya habis. Jadi penerima tetap
-# tahu pengemudinya berulang kali mengantuk — tanpa kotak masuknya dibanjiri.
+# Paling banyak satu email per jeda ini; kejadian di dalam jeda dikirim sebagai ringkasan.
 EMAIL_COOLDOWN_SECONDS = 2 * 60
 
 EVENT_LABELS = {
@@ -257,15 +180,10 @@ class VideoFrameHandler:
         self.email_sender   = "deteksikantuk@gmail.com"
         self.email_password = config('EMAIL_PASSWORD', default='')
         self.email_recipients = []  # diisi dari Streamlit sesuai email akun yang login; kosong = tidak kirim (mis. tamu)
-        # Link Google Maps posisi terakhir pengemudi, diisi dari Streamlit.
-        # Disimpan per handler (= per sesi browser). Dulu ini satu variabel
-        # global di modul, yang dipakai bersama SEMUA pengguna di server —
-        # email darurat pengguna A bisa berisi lokasi pengguna B.
+        # Link Google Maps posisi terakhir pengemudi (per sesi browser).
         self.location_link = "Lokasi tidak tersedia"
 
-        # Status pembatasan email (lihat EMAIL_COOLDOWN_SECONDS). Disimpan di
-        # handler, yang hidup di session_state, jadi jedanya tetap berlaku
-        # walau kamera di-STOP lalu START lagi.
+        # Status pembatasan email.
         self._last_email_at  = None  # time.monotonic() saat email terakhir dikirim
         self._held_events    = {}    # jenis kejadian -> jumlah yang ditahan
 
@@ -282,16 +200,11 @@ class VideoFrameHandler:
 
         self.facemesh_model = get_mediapipe_app()
 
-        # Semua kejadian sesi yang sedang berjalan. Disimpan ke database
-        # BERTAHAP selama sesi berjalan (lihat save_progress di halaman), bukan
-        # sekaligus saat STOP — supaya kalau HP mendadak mati, data sampai
-        # simpanan terakhir tidak ikut hilang.
+        # Kejadian sesi berjalan; disimpan ke database secara bertahap.
         self.pending_events    = []
         self.events_saved      = 0     # berapa kejadian di pending_events yang sudah tersimpan
         self.last_saved_at     = 0.0   # time.time() simpanan terakhir
-        # Penjaga supaya satu sesi cuma ditutup sekali, walau penutupnya
-        # terpanggil dua kali (terbukti terjadi; lihat _TOTALS_FROM_EVENTS di
-        # database.py). Sengaja disimpan di objek ini, bukan di session_state.
+        # Penjaga agar satu sesi hanya ditutup sekali.
         self.session_lock      = threading.RLock()
         self.closed_sessions   = set()
         self._eye_event_start  = None
@@ -336,8 +249,7 @@ class VideoFrameHandler:
                 server.starttls()
                 server.login(self.email_sender, self.email_password)
                 for recipient in self.email_recipients:
-                    # `msg["To"] = ...` MENAMBAH header, bukan mengganti — tanpa
-                    # del, penerima kedua ikut melihat alamat penerima pertama.
+                    # Hapus header To lama supaya tiap penerima hanya melihat alamatnya sendiri.
                     del msg["To"]
                     msg["To"] = recipient
                     server.sendmail(self.email_sender, recipient, msg.as_string())
@@ -353,11 +265,7 @@ class VideoFrameHandler:
                 or time.monotonic() - self._last_email_at >= EMAIL_COOLDOWN_SECONDS)
 
     def request_email_alert(self, kind: str, subject: str, message: str):
-        """Minta email darurat untuk satu kejadian, lewat pembatas.
-
-        Kalau jendela jeda sudah lewat, email langsung dikirim. Kalau belum,
-        kejadiannya cuma dihitung — nanti dilaporkan oleh flush_held_emails().
-        """
+        """Kirim email darurat, atau tahan dan hitung kejadiannya kalau masih dalam jeda."""
         if not self.email_recipients:
             return  # tamu / akun tanpa email: tidak ada yang perlu dikirimi
         if self._email_window_open():
@@ -367,8 +275,7 @@ class VideoFrameHandler:
             self._held_events[kind] = self._held_events.get(kind, 0) + 1
 
     def flush_held_emails(self):
-        """Kirim SATU email ringkasan untuk kejadian yang ditahan, begitu
-        jendela jedanya habis. Dipanggil tiap frame dari process()."""
+        """Kirim satu email ringkasan untuk kejadian yang ditahan setelah jeda habis."""
         if not self._held_events or not self._email_window_open():
             return
         rincian = ", ".join(
@@ -393,16 +300,13 @@ class VideoFrameHandler:
     def process(self, frame: np.array, thresholds: dict):
         frame_h, frame_w, _ = frame.shape
 
-        # Dicek di awal, sebelum deteksi wajah — kalau kepala pengemudi sampai
-        # terkulai dan wajahnya tidak terdeteksi, ringkasan tetap harus terkirim.
+        # Cek ringkasan email sebelum deteksi wajah, agar tetap terkirim walau wajah tidak terdeteksi.
         self.flush_held_emails()
 
         # Enhance frame untuk kondisi minim cahaya (CLAHE)
         frame = enhance_low_light(frame)
 
-        # Jarak antar baris ikut lebar frame, sejalan dengan ukuran huruf di
-        # plot_text() — kalau dipatok tetap, teksnya jadi terlalu renggang di
-        # frame kecil dan terlalu rapat di frame besar.
+        # Jarak antar baris teks mengikuti lebar frame.
         ui = max(0.45, min(1.25, frame_w / 640))
         pad, line = int(10 * ui), int(30 * ui)
 
@@ -418,16 +322,7 @@ class VideoFrameHandler:
         WARN_TILT_pos   = (pad, int(frame_h / 2 + line * 2))
         ALM_txt_pos     = (pad, int(frame_h / 2 - line * 2))
 
-        # MediaPipe mengharapkan RGB. Sebelumnya frame BGR dikirim apa adanya,
-        # jadi channel merah dan biru tertukar. Pada gambar uji di repo wajahnya
-        # ternyata TETAP kedeteksi walau formatnya salah, jadi ini bukan
-        # perbaikan kecepatan — ini soal benar: model dilatih pada RGB, dan
-        # presisi landmark pada wajah/pencahayaan lain tidak bisa diandalkan
-        # kalau inputnya tertukar begini.
-        #
-        # Salinan RGB-nya ditandai read-only supaya MediaPipe boleh memakainya
-        # tanpa menyalin lagi; `frame` sendiri tetap BGR dan tetap bisa ditulisi
-        # oleh fungsi-fungsi plot_* di bawah.
+        # MediaPipe membutuhkan citra RGB.
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         rgb.flags.writeable = False
         results = self.facemesh_model.process(rgb)
@@ -502,10 +397,7 @@ class VideoFrameHandler:
                 self.state_tracker["YAWN_TIME"]       += yawn_end - self.state_tracker["YAWN_start_time"]
                 self.state_tracker["YAWN_start_time"]  = yawn_end
                 self.state_tracker["is_yawning"]       = True
-                # Alarm baru menyala setelah mulut terbuka selama WAIT_TIME,
-                # sama seperti mata. Dulu langsung menyala begitu MAR lewat
-                # ambang di SATU frame saja — bicara sebentar pun membunyikan
-                # alarm.
+                # Alarm menguap menyala setelah mulut terbuka selama WAIT_TIME.
                 if self.state_tracker["YAWN_TIME"] >= thresholds["WAIT_TIME"]:
                     self.state_tracker["yawn_alarm"] = True
                     plot_text(frame, "MENGUAP TERDETEKSI!", WARN_YAWN_pos, self.ORANGE)
@@ -547,9 +439,7 @@ class VideoFrameHandler:
                 self.state_tracker["TILT_TIME"]       += tilt_end - self.state_tracker["TILT_start_time"]
                 self.state_tracker["TILT_start_time"]  = tilt_end
                 self.state_tracker["is_tilting"]       = True
-                # Sama seperti menguap: tunggu WAIT_TIME dulu, supaya kepala
-                # yang miring sesaat (menoleh ke spion, dsb.) tidak membunyikan
-                # alarm.
+                # Alarm kepala miring menyala setelah kepala miring selama WAIT_TIME.
                 if self.state_tracker["TILT_TIME"] >= thresholds["WAIT_TIME"]:
                     self.state_tracker["tilt_alarm"] = True
                     plot_text(frame, "KEPALA MIRING!", WARN_TILT_pos, self.YELLOW)

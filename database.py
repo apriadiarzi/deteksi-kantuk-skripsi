@@ -7,33 +7,16 @@ import psycopg2
 from decouple import config
 
 
-# Koneksi Postgres (Neon). Diisi lewat Secrets di Streamlit Cloud dan lewat
-# .env di lokal — keduanya boleh (malah sebaiknya) menunjuk ke database yang
-# sama, supaya akun yang didaftarkan di lokal juga langsung ada di web.
-#
-# Kenapa bukan SQLite lagi: filesystem Streamlit Community Cloud itu ephemeral.
-# Container-nya dibangun ulang dari repo GitHub tiap redeploy/reboot, jadi file
-# user_data.db selalu ketimpa balik ke versi yang ada di git — akun yang
-# didaftarkan lewat web selalu hilang. Database eksternal hidup di luar
-# container, jadi datanya tidak ikut ter-reset.
+# URL database Neon PostgreSQL, dari Secrets (Streamlit Cloud) atau .env (lokal).
 DATABASE_URL = config('DATABASE_URL')
 
-# Koneksinya dipakai ulang, bukan dibuka-tutup tiap pemanggilan fungsi.
-# Alasannya terukur: membuka koneksi baru ke Neon makan ~380 ms (handshake
-# TCP+TLS) sementara query-nya sendiri cuma ~19 ms — 95% biayanya di handshake.
-# Dari Streamlit Cloud (server di Amerika, database di Singapura) angka itu
-# berlipat, dan tiap panggilan DB ikut menahan jalannya script Streamlit.
+# Satu koneksi dipakai ulang untuk menghindari biaya handshake di setiap query.
 _conn = None
 _conn_lock = threading.Lock()
 
 @contextmanager
 def _db(commit=False):
-    """Pinjam cursor dari koneksi bersama.
-
-    Neon menidurkan database saat menganggur, jadi koneksi yang tersimpan bisa
-    basi tanpa pemberitahuan. Kalau itu terjadi, koneksinya dibuang dan operasi
-    diulang sekali dengan koneksi baru.
-    """
+    """Pinjam cursor dari koneksi bersama; koneksi yang terputus dibuat ulang sekali."""
     global _conn
     with _conn_lock:
         cursor = None
@@ -44,12 +27,7 @@ def _db(commit=False):
                     _conn = psycopg2.connect(DATABASE_URL)
                 cursor = _conn.cursor()
                 if not baru:
-                    # Koneksi lama belum tentu masih hidup. Neon menidurkan
-                    # database saat menganggur dan socket-nya mati tanpa
-                    # mengubah nilai `closed`, sementara `.cursor()` tidak
-                    # menyentuh jaringan sama sekali sehingga selalu lolos.
-                    # Tanpa ping ini, kegagalan baru muncul saat execute() —
-                    # yaitu di luar blok retry, jadi langsung melempar error.
+                    # Ping untuk memastikan koneksi lama masih hidup.
                     cursor.execute('SELECT 1')
                 break
             except (psycopg2.OperationalError, psycopg2.InterfaceError):
@@ -80,22 +58,15 @@ def _db(commit=False):
                 pass
 
 def now_wib():
-    """Waktu sekarang di WIB (UTC+7), dihitung dari UTC — jadi tidak
-    tergantung timezone server (server cloud biasanya UTC, laptop lokal bisa
-    beda-beda), supaya jam yang tersimpan selalu konsisten di WIB."""
+    """Waktu sekarang dalam WIB (UTC+7), tidak tergantung timezone server."""
     return datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(hours=7)
 
 # ─── Mode Tamu ────────────────────────────────────────────────────────────────
-# Ditandai lewat cookie yang sama dengan login biasa (bukan session_state) agar
-# tetap "nyantol" walau tab di-refresh atau dibuka ulang.
+# Mode tamu ditandai lewat penyimpanan login yang sama dengan akun biasa.
 GUEST_COOKIE_VALUE = "__guest__"
 GUEST_STORAGE_KEY = "drowsiness_guest_sessions"
 
-# Key localStorage tempat token "ingat saya" disimpan di browser masing-masing
-# pengunjung (lihat set_session_token/get_username_by_token). Ini BUKAN
-# cookies.pkl versi baru — localStorage bawaannya sudah per-browser/per-origin,
-# tidak pernah dibagi antar pengunjung, dan isinya cuma token acak yang harus
-# cocok dengan DB, bukan username mentah yang bisa dipalsukan lewat DevTools.
+# Key localStorage untuk token login di browser.
 AUTH_STORAGE_KEY = "drowsiness_auth_token"
 
 def resolve_guest_user(cookie_value):
@@ -114,9 +85,7 @@ def compute_session_totals(events):
 
 # ─── Setup ────────────────────────────────────────────────────────────────────
 
-# create_db() dipanggil di baris atas halaman utama, artinya kena tiap kali
-# script dijalankan ulang — termasuk tiap detik saat autorefresh monitoring
-# aktif. Cukup sekali saja per proses.
+# Skema cukup dibuat sekali per proses.
 _schema_ready = False
 
 def create_db():
@@ -188,10 +157,7 @@ def save_otp(email, otp_code, username, password):
         )
 
 def verify_otp(username, otp_input):
-    """
-    Verifikasi OTP. Jika valid dan belum expired (10 menit),
-    buat akun dan hapus data pending.
-    """
+    """Verifikasi OTP (berlaku 10 menit); jika valid, buat akun dan hapus data pending."""
     with _db(commit=True) as cursor:
         cursor.execute(
             'SELECT email, password, otp_code, created_at FROM pending_registrations WHERE username=%s',
@@ -252,23 +218,17 @@ def get_user_email(username):
         return result[0] if result else None
 
 
-# ─── Token "ingat saya" (persist login lewat localStorage, BUKAN cookies.pkl) ──
-# Satu token per akun (bukan per-device) — simpel & cukup untuk skala thesis
-# ini. Konsekuensinya: login di browser/device baru akan membuat token lama
-# di device lain berhenti berlaku (bukan bug keamanan, cuma harus login ulang).
+# ─── Token login ──────────────────────────────────────────────────────────────
 
 def set_session_token(username):
-    """Buat token acak baru, simpan di DB untuk akun ini, kembalikan tokennya
-    supaya bisa didorong ke localStorage browser yang bersangkutan."""
+    """Buat token login acak untuk akun ini dan simpan di database."""
     token = secrets.token_hex(32)
     with _db(commit=True) as cursor:
         cursor.execute('UPDATE users SET session_token=%s WHERE username=%s', (token, username))
     return token
 
 def get_username_by_token(token):
-    """Cari pemilik token — dipakai untuk memulihkan login dari localStorage.
-    Token acak & tersimpan di DB, jadi tidak bisa dipalsukan cuma dengan
-    menebak/mengetik username di localStorage lewat DevTools."""
+    """Cari pemilik token login."""
     if not token:
         return None
     with _db() as cursor:
@@ -277,8 +237,7 @@ def get_username_by_token(token):
         return result[0] if result else None
 
 def clear_session_token(username):
-    """Cabut token saat logout, supaya localStorage lama (kalau tidak sempat
-    terhapus di browser) tidak bisa dipakai untuk login lagi."""
+    """Hapus token login saat logout."""
     if not username:
         return
     with _db(commit=True) as cursor:
@@ -288,14 +247,9 @@ def clear_session_token(username):
 # ─── Sessions ─────────────────────────────────────────────────────────────────
 
 def start_session(username):
-    """
-    Dipanggil saat user klik START.
-    Membuat sesi baru dan mengembalikan session_id.
-    """
+    """Buat sesi berkendara baru dan kembalikan id-nya."""
     start_time = now_wib().strftime('%Y-%m-%d %H:%M:%S')
-    # Satu perjalanan ke database saja, bukan dua: id user dicari langsung di
-    # dalam INSERT-nya. Fungsi ini jalan tepat saat kamera mulai menyala, jadi
-    # jangan sampai menahan script lebih lama dari perlunya.
+    # Id user dicari langsung di dalam INSERT (satu query).
     with _db(commit=True) as cursor:
         cursor.execute('''
             INSERT INTO driving_sessions (user_id, start_time)
@@ -305,13 +259,7 @@ def start_session(username):
         row = cursor.fetchone()
         return row[0] if row else None
 
-# Total per jenis dihitung dari tabel drowsiness_events itu sendiri, bukan dari
-# list yang kebetulan dikirim pemanggil. Dulu total diisi dari list itu — dan
-# end_session() terbukti kadang terpanggil DUA kali untuk sesi yang sama: yang
-# pertama membawa semua kejadian, yang kedua membawa list yang sudah
-# dikosongkan, lalu menimpa totalnya jadi 0. Hasilnya Histori menulis
-# "0 kejadian" padahal daftar kejadiannya berisi 20 (terlihat dari kolom xmin
-# Postgres: baris kejadian dan baris sesi ditulis di dua transaksi berbeda).
+# Total per jenis kejadian dihitung dari tabel drowsiness_events.
 _TOTALS_FROM_EVENTS = '''
     total_eye_close = (SELECT count(*) FROM drowsiness_events e
                        WHERE e.session_id = s.id AND e.event_type = 'eye_close'),
@@ -322,29 +270,13 @@ _TOTALS_FROM_EVENTS = '''
 '''
 
 def save_session_progress(session_id, new_events: list):
-    """
-    Simpan kejadian BARU sesi ini, lalu perbarui waktu selesai, durasi, dan
-    total sesinya. Dipanggil berkala selama sesi berjalan dan sekali lagi saat
-    sesi ditutup — jadi kalau HP mendadak mati atau aplikasinya ditutup, data
-    sampai simpanan terakhir sudah aman di database.
-
-    Aman dipanggil berkali-kali: total dihitung ulang dari database, dan
-    waktu selesai selalu waktu simpanan terakhir.
-
-    new_events = list of dict (cuma yang BELUM pernah disimpan):
-        {
-            'event_type': 'eye_close' | 'yawn' | 'head_tilt',
-            'event_time': '2025-01-01 08:10:20',
-            'duration': 3.2
-        }
-    """
+    """Simpan kejadian baru sesi ini lalu perbarui waktu selesai, durasi, dan totalnya."""
     if session_id is None:
         return
 
     end_time = now_wib().strftime('%Y-%m-%d %H:%M:%S')
 
-    # Semuanya dalam satu transaksi: kejadian baru masuk dan baris sesi
-    # diperbarui bersamaan, atau tidak sama sekali.
+    # Satu transaksi untuk insert kejadian dan update sesi.
     with _db(commit=True) as cursor:
         if new_events:
             cursor.executemany('''
@@ -361,8 +293,7 @@ def save_session_progress(session_id, new_events: list):
         ''', (end_time, end_time, session_id))
 
 def end_session(session_id, remaining_events: list):
-    """Dipanggil saat sesi ditutup (STOP / keluar): simpan sisa kejadian yang
-    belum tersimpan lalu perbarui ringkasan sesinya untuk terakhir kali."""
+    """Simpan sisa kejadian dan perbarui ringkasan sesi saat sesi ditutup."""
     save_session_progress(session_id, remaining_events)
 
 
@@ -370,9 +301,7 @@ def end_session(session_id, remaining_events: list):
 
 def get_sessions_by_username(username):
     """Ambil semua sesi berkendara milik user, terbaru di atas."""
-    # Total dihitung langsung dari drowsiness_events, bukan dibaca dari kolom
-    # total_* — supaya sesi lama yang kolom totalnya sempat tertimpa 0 (lihat
-    # _TOTALS_FROM_EVENTS) tetap tampil benar tanpa perlu memperbaiki datanya.
+    # Total kejadian dihitung langsung dari tabel drowsiness_events.
     with _db() as cursor:
         cursor.execute('''
             SELECT s.id, s.start_time, s.end_time, s.duration,

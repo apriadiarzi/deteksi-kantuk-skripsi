@@ -1,10 +1,4 @@
-"""Pengukuran waktu proses per frame, khusus mode diagnostik.
-
-Aktif hanya kalau DIAGNOSTIK=1 — lewat Secrets di Streamlit Cloud (kunci di
-level teratas, Streamlit menjadikannya environment variable saat server
-start) atau lewat .env / environment variable di lokal. Saat mati, aplikasi
-berjalan persis seperti biasa: tidak ada yang diukur, dicatat, atau ditampilkan.
-"""
+"""Pengukuran waktu proses per frame, aktif hanya jika DIAGNOSTIK=1."""
 import math
 import threading
 
@@ -14,11 +8,7 @@ DIAGNOSTIK_AKTIF = config("DIAGNOSTIK", default="0").strip().lower() in ("1", "t
 
 
 class FrameTimer:
-    """Kumpulan waktu proses per frame yang aman dipakai lintas thread.
-
-    record() dipanggil dari thread kamera (callback WebRTC), summary() dari
-    thread script Streamlit — keduanya dilindungi satu lock.
-    """
+    """Kumpulan waktu proses per frame yang aman lintas thread."""
 
     WARMUP_FRAMES = 10   # frame pertama setelah START tidak dihitung (pemanasan)
     LOG_EVERY = 100      # ringkasan dicetak ke console tiap sekian frame terhitung

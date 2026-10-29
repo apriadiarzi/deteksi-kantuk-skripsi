@@ -1,18 +1,4 @@
-"""
-Uji statis (Subbab 4.3.1 Verifikasi Perhitungan pada Citra Statis).
-
-Taruh file ini di folder project (sejajar dengan deteksi_kantuk.py), lalu jalankan:
-    python uji_statis.py
-
-Pengaturan sama dengan aplikasi:
-  - fungsi EAR, MAR, sudut kepala, CLAHE diambil langsung dari deteksi_kantuk.py
-  - nomor & urutan titik landmark sama dengan VideoFrameHandler
-  - CLAHE (clipLimit 3,0, tile 8x8) pada kanal Y, konversi BGR -> RGB
-  - FaceMesh: 1 wajah, refine_landmarks=False, confidence 0,5
-  - threshold bawaan aplikasi: EAR 0,23 | MAR 0,60 | sudut 20 derajat
-
-Hasil: folder "hasil_uji_statis" berisi gambar beranotasi + hasil_uji_statis.csv
-"""
+"""Uji statis EAR, MAR, dan sudut kepala pada citra uji; hasil di folder hasil_uji_statis."""
 import os
 import sys
 import csv

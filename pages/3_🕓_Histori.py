@@ -18,7 +18,6 @@ st.set_page_config(
 )
 
 # ── CSS ───────────────────────────────────────────────────────────────────────
-# Token & arah desain sama dengan halaman utama: navy/blue cool-tone.
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap');
@@ -120,15 +119,10 @@ h1, h2, h3 { font-family: 'Space Grotesk', sans-serif; }
 [data-testid="stSelectbox"] div[data-baseweb="select"] { cursor: pointer; }
 [data-testid="stDateInput"] div[data-baseweb="base-input"] { cursor: pointer; }
 
-/* Emoji "kepala miring" — tidak ada emoji unicode utuh untuk itu, jadi pakai
-   yang sudah ada (😵) tapi dimiringkan manual lewat transform. Cuma bisa
-   diterapkan di tempat yang HTML-nya saya kontrol langsung (daftar rincian
-   kejadian) — di label checkbox Streamlit tidak menerima HTML sama sekali,
-   jadi di situ emoji-nya polos saja tanpa rotasi. */
+/* Emoji kepala miring: 😵 diputar lewat transform. */
 .tilt-icon { display: inline-block; transform: rotate(15deg); }
 
-/* Identitas sidebar dijadikan satu blok, supaya jaraknya tidak melebar
-   karena gap antar-elemen bawaan Streamlit. */
+/* Identitas sidebar dalam satu blok. */
 .side-user {
     padding-bottom: 0.7rem;
     margin-bottom: 0.7rem;
@@ -160,17 +154,9 @@ h1, h2, h3 { font-family: 'Space Grotesk', sans-serif; }
 """, unsafe_allow_html=True)
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
-# st.session_state, bukan file di server — lihat catatan di 2_🥱_Deteksi_Kantuk.py
-# soal kenapa cookies.pkl (file global di server) adalah bug keamanan serius.
-# Di sini set_cookie cuma dipakai untuk logout, jadi selalu bersihkan token
-# "ingat saya" di localStorage juga (lihat AUTH_STORAGE_KEY / blok pulihkan
-# login di bawah, dan penjelasan lengkapnya di 2_🥱_Deteksi_Kantuk.py).
 def set_cookie(username):
     st.session_state["auth_user"] = username
-    # Ditunda ke render berikutnya, bukan components.html() langsung di sini —
-    # set_cookie() di sini selalu dipanggil tepat sebelum st.experimental_rerun(),
-    # yang bisa memotong pengiriman elemen sebelum sempat "nyantol" ke browser.
-    # Detail lengkapnya di flush_pending_auth_storage_write() @ 2_🥱_Deteksi_Kantuk.py.
+    # Penghapusan token di localStorage ditunda ke render berikutnya.
     st.session_state["pending_auth_storage_write"] = "__clear__"
 
 def get_cookie():
@@ -188,9 +174,7 @@ def flush_pending_auth_storage_write():
 flush_pending_auth_storage_write()
 
 # ── Pulihkan login dari token di localStorage browser ────────────────────────
-# Sama seperti di halaman Deteksi Kantuk: session_state hilang tiap refresh
-# browser, jadi tokennya dicek lewat localStorage (per-browser) dan divalidasi
-# ke DB sebelum dipercaya.
+# Token dari localStorage divalidasi ke database sebelum login dipulihkan.
 query_params = st.experimental_get_query_params()
 needs_auth_restore = "auth_user" not in st.session_state and not st.session_state.get("auth_restore_done")
 
@@ -295,8 +279,7 @@ st.markdown(f"""
 events_by_session = None
 if is_guest:
     query_params = st.experimental_get_query_params()
-    # Kalau halaman utama baru saja menyimpan sesi tamu, data yang nyangkut di
-    # URL sudah basi — paksa ambil ulang dari localStorage.
+    # Data tamu di URL basi kalau sesi tamu baru saja disimpan.
     need_fresh = st.session_state.get("guest_history_dirty", False)
     if "gdata" in query_params and not need_fresh:
         try:
@@ -313,9 +296,7 @@ if is_guest:
             for s in guest_raw
         }
     else:
-        # Selalu tulis ulang, tanpa cek "kalau belum ada di URL" — justru cek
-        # itu yang bikin sesi tamu yang baru selesai tidak pernah kelihatan
-        # sampai halaman di-refresh manual.
+        # Selalu ambil ulang data tamu dari localStorage.
         components.html(f"""
         <script>
         const raw = localStorage.getItem('{GUEST_STORAGE_KEY}') || '[]';
@@ -324,9 +305,7 @@ if is_guest:
         </script>
         """, height=0)
         st.session_state["guest_history_dirty"] = False
-        # Key diberi suffix unik per kunjungan halaman ini, karena limit
-        # st_autorefresh terikat ke key seumur sesi — key tetap akan "habis"
-        # dan tidak jalan lagi saat halaman ini dibuka ulang.
+        # Key autorefresh unik per kunjungan halaman.
         st.session_state["guest_fetch_attempt"] = st.session_state.get("guest_fetch_attempt", 0) + 1
         st_autorefresh(interval=300, limit=2, key=f"guest_data_fetch_{st.session_state['guest_fetch_attempt']}")
         st.info("Memuat histori tamu...")

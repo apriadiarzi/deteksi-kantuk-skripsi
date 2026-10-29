@@ -1,33 +1,11 @@
-"""Ukur waktu handshake dan query ke database Neon PostgreSQL.
-
-Jalankan dari folder project:
-    python ukur_db.py              # 10 percobaan
-    python ukur_db.py --n 20       # jumlah percobaan lain
-    python ukur_db.py --user NAMA  # akun yang dipakai untuk query Histori
-
-PENTING: dijalankan dari laptop, angka ini mengukur jalur LAPTOP -> Neon. Untuk
-jalur Streamlit Cloud -> Neon (yang dialami aplikasi), jalankan fungsi yang sama
-dari panel "Diagnostik" di aplikasi yang sudah di-deploy dengan DIAGNOSTIK=1.
-
-Tiap percobaan memakai koneksi BARU:
-  1. handshake : psycopg2.connect() — DNS, TCP, TLS, autentikasi (dan bangun
-                 dari tidur kalau compute Neon sedang suspend)
-  2. SELECT    : query halaman Histori (daftar sesi + jumlah kejadian per jenis)
-  3. tulis     : INSERT kejadian + UPDATE ringkasan sesi, persis seperti
-                 save_session_progress(), di dalam transaksi yang DI-ROLLBACK
-                 sehingga tidak ada data yang tersimpan.
-
-Kredensial tidak pernah dicetak. Catatan: walau di-rollback, nomor urut SERIAL
-(id) tetap maju — itu sifat sequence Postgres, bukan data yang tersimpan.
-"""
+"""Ukur waktu handshake dan query ke database Neon PostgreSQL (python ukur_db.py [--n N] [--user NAMA])."""
 import argparse
 import statistics
 import time
 
 import psycopg2
 
-# Sumber kredensial & SQL yang SAMA dengan aplikasi (config() dari decouple:
-# .env di lokal, Secrets -> environment variable di Streamlit Cloud).
+# Kredensial dan SQL diambil dari modul database aplikasi.
 from database import DATABASE_URL, _TOTALS_FROM_EVENTS
 
 SELECT_HISTORI = '''
@@ -52,9 +30,7 @@ CONTOH_KEJADIAN = [  # 3 kejadian, satu per jenis — ukuran simpanan bertahap y
 
 
 def _aman(e: Exception) -> str:
-    """Pesan error tanpa kredensial (juga tanpa nama user & host database —
-    pesan error psycopg2 menyebut host-nya, dan pesan ini bisa tampil di
-    panel Diagnostik aplikasi)."""
+    """Pesan error tanpa password, user, dan host database."""
     msg = f"{type(e).__name__}: {e}".strip()
     if DATABASE_URL:
         msg = msg.replace(DATABASE_URL, "<DATABASE_URL>")
@@ -112,9 +88,7 @@ def ukur(n: int = 10, username: str = None):
         conn = psycopg2.connect(DATABASE_URL)
         t_handshake = (time.perf_counter() - t0) * 1000
         try:
-            # SELECT halaman Histori. Autocommit supaya yang terukur cuma query
-            # itu sendiri: tanpa autocommit, psycopg2 mengirim BEGIN terpisah
-            # sebelum query pertama — satu perjalanan bolak-balik tambahan.
+            # SELECT dijalankan dengan autocommit agar tidak ada BEGIN tambahan.
             conn.autocommit = True
             with conn.cursor() as cur:
                 t0 = time.perf_counter()
@@ -124,9 +98,7 @@ def ukur(n: int = 10, username: str = None):
             conn.autocommit = False
 
             with conn.cursor() as cur:
-                # Baris sesi sementara (tidak diukur, sekaligus membuka
-                # transaksinya) — supaya UPDATE di bawah
-                # tidak menyentuh sesi milik siapa pun.
+                # Baris sesi sementara (tidak diukur), dibatalkan lewat rollback.
                 cur.execute('''
                     INSERT INTO driving_sessions (user_id, start_time)
                     VALUES (%s, '2026-01-01 08:00:00') RETURNING id
@@ -164,10 +136,7 @@ def format_tabel(hasil) -> str:
     rows = hasil["rows"]
     k = lambda x: f"{x:.1f}".replace(".", ",")
     hs = [r["handshake"] for r in rows]
-    # Percobaan ke-1 ditandai kalau handshake-nya > 2x median percobaan lainnya
-    # DAN lebih lambat dari semuanya (tanda compute Neon baru bangun dari
-    # suspend / cold start). Syarat kedua perlu: variasi jaringan biasa bisa
-    # membuat percobaan ke-1 > 2x median padahal percobaan lain sama lambatnya.
+    # Percobaan ke-1 ditandai cold start jika > 2x median dan paling lambat.
     cold = len(hs) > 1 and hs[0] > 2 * statistics.median(hs[1:]) and hs[0] > max(hs[1:])
 
     lines = [f"{'Percobaan':>9} | {'Handshake (ms)':>14} | {'SELECT (ms)':>11} | {'INSERT+UPDATE (ms)':>18}",

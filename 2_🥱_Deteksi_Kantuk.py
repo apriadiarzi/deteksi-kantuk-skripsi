@@ -40,45 +40,19 @@ create_db()
 EMAIL_SENDER   = "deteksikantuk@gmail.com"
 EMAIL_PASSWORD = config('EMAIL_PASSWORD')
 
-# Berapa detik kamera harus benar-benar mati sebelum sesi dianggap selesai.
-# Jangan dibikin terlalu pendek: kalau koneksi WebRTC sempat goyang sebentar,
-# sesi keburu dianggap selesai padahal user tidak menekan STOP.
+# Lama kamera harus mati (detik) sebelum sesi dianggap selesai.
 CAMERA_OFF_GRACE = 3.0
 
 # ── STUN/TURN ─────────────────────────────────────────────────────────────────
-# Di localhost, STUN saja cukup karena browser dan server ada di mesin yang
-# sama. Begitu di-deploy ke Streamlit Community Cloud, servernya ada di balik
-# proxy/firewall yang memblokir jalur WebRTC langsung: negosiasi ICE mentok di
-# status `signalling` dan tidak pernah sampai `playing`, jadi videonya kosong
-# terus walau tombolnya sudah berubah jadi STOP. TURN dipakai sebagai perantara
-# yang melewatkan media saat jalur langsung tidak bisa terbentuk.
-#
-# Kredensial dibaca dari Secrets (Streamlit Cloud) / .env (lokal), tidak pernah
-# masuk git. Kalau belum diisi, otomatis balik ke STUN-only supaya development
-# di lokal tetap jalan tanpa perlu setup apa pun.
+# Kredensial TURN Metered dari Secrets/.env; kosong = STUN saja.
 METERED_APP_NAME = config('METERED_APP_NAME', default='')
 METERED_API_KEY  = config('METERED_API_KEY', default='')
 
 STUN_ONLY = [{"urls": ["stun:stun.l.google.com:19302"]}]
 
-# Dulu ada cadangan TURN publik gratis (Open Relay, kredensial
-# "openrelayproject") kalau API Metered gagal. Sudah dibuang: diuji di Chrome,
-# keempat alamatnya tidak lagi memberi kandidat relay sama sekali, dan cuma
-# menahan START 21–40 detik sebelum tetap gagal.
 
 def build_ice_servers():
-    """Ambil daftar server ICE (STUN + TURN) dari Metered.
-
-    Kredensial TURN-nya berumur pendek dan diambil lewat API, jadi yang
-    disimpan di Secrets cuma nama app + API key. Hasilnya di-cache karena
-    halaman ini di-rerun tiap detik saat monitoring aktif — tidak perlu
-    menembak API tiap rerun.
-
-    Kalau pengambilan kredensial gagal, hasil cadangannya (STUN saja) IKUT di-cache (dengan
-    umur pendek). Tanpa itu, tiap rerun akan menembak API yang sedang bermasalah
-    lagi dan app-nya ikut menggantung sampai timeout — padahal saat monitoring
-    aktif rerun-nya tiap detik.
-    """
+    """Ambil daftar server ICE (STUN + TURN) dari Metered, di-cache per sesi."""
     if not (METERED_APP_NAME and METERED_API_KEY):
         return STUN_ONLY
 
@@ -99,35 +73,17 @@ def build_ice_servers():
         resp.raise_for_status()
         servers = resp.json()
         if not isinstance(servers, list) or not servers:
-            # API balas 200 tapi isinya bukan daftar server (mis. pesan error) —
-            # kalau diteruskan ke rtc_configuration, WebRTC-nya justru rusak.
+            # Respons bukan daftar server dianggap gagal.
             raise ValueError(f"format respons tidak dikenal: {servers!r}")
     except Exception as e:
-        # Jangan sampai app mati cuma karena TURN tidak terjangkau: turun ke
-        # STUN saja. Di lokal itu sudah cukup; di cloud kamera tidak akan
-        # tersambung, tapi gagalnya cepat, bukan menggantung. TTL-nya sengaja
-        # pendek supaya kredensial Metered dicoba lagi begitu API-nya pulih.
+        # Gagal ambil kredensial: pakai STUN saja, dicoba lagi setelah 60 detik.
         print(f"Gagal ambil kredensial TURN: {e} — sementara STUN saja")
         return _cache(STUN_ONLY, 60)
 
     return _cache(servers, 1800)
 
 # ── Pangkas daftar TURN untuk BROWSER ─────────────────────────────────────────
-# Frontend streamlit-webrtc baru mengirim offer setelah browser selesai
-# menghubungi SEMUA server STUN/TURN (menunggu iceGatheringState "complete"),
-# tanpa batas waktu. Diukur di Chrome: TURN lewat UDP memberi kandidat relay
-# dalam ~1,3 detik, tapi "complete"-nya baru datang setelah ~40 detik — satu
-# permintaan UDP tidak pernah dijawab dan Chrome baru menyerah setelah batas
-# waktu bawaannya. Itulah 40 dari 42 detik waktu START.
-#
-#   STUN + TURN UDP:80 + TURN TLS:443   → 39,97 s
-#   STUN + TURN TCP:80 + TURN TLS:443   →  0,29 s   (kandidatnya sama lengkap)
-#
-# Jadi browser cuma diberi TURN lewat TCP (port 80) dan TLS (port 443, lolos
-# hampir semua firewall). Harganya: di sinyal jelek, TCP menunggu paket yang
-# hilang dikirim ulang, jadi video bisa sesekali tersendat — jauh lebih bisa
-# diterima daripada menunggu 40 detik tiap START. Hasil deteksinya sendiri
-# tidak berubah; frame yang sampai justru selalu utuh.
+# Browser hanya diberi TURN lewat TCP dan TLS agar START tidak tertahan menunggu TURN UDP.
 def trim_turn_urls(servers):
     trimmed, have_tcp, have_tls = [], False, False
     for s in servers:
@@ -147,27 +103,7 @@ def trim_turn_urls(servers):
     return trimmed
 
 # ── TURN untuk sisi SERVER juga ───────────────────────────────────────────────
-# rtc_configuration di webrtc_streamer() cuma dipakai BROWSER. Sisi server
-# (aiortc) dibuat oleh streamlit-webrtc 0.43.4 dengan RTCPeerConnection() polos,
-# sehingga aiortc memakai bawaannya: STUN Google saja, tanpa TURN.
-#
-# Padahal server Streamlit Cloud sendiri ada di balik NAT. Kalau alamat
-# publiknya dari STUN gagal didapat, kandidat server tinggal IP privat
-# kontainer — yang tidak bisa dicapai relay milik browser. ICE berakhir
-# `failed`, dan frontend komponennya otomatis berhenti begitu ICE `failed`/
-# `disconnected`: video tidak pernah muncul dan tombol balik sendiri ke START.
-#
-# Dengan kredensial TURN yang sama, server ikut punya kandidat relay sendiri,
-# jadi selalu ada jalur relay↔relay yang pasti bisa dipakai. Jalur itu
-# prioritasnya paling rendah, jadi cuma terpakai kalau jalur yang lebih langsung
-# gagal — dan saat terpakai, media melewati relay dua kali, kuota ikut dobel.
-# Diukur di lokal: menambah ~0,1 detik saat mulai menyambung.
-#
-# Caranya lewat RTCIceGatherer.getDefaultIceServers, yang dipanggil aiortc saat
-# RTCPeerConnection dibuat tanpa konfigurasi (sudah dicek ada di aiortc 1.9.0,
-# versi yang terpasang di cloud). streamlit-webrtc versi baru punya parameter
-# `server_rtc_configuration` untuk ini, tapi menaikkan versinya ikut menyeret
-# versi streamlit yang sengaja dikunci di 1.17.0 (lihat requirements.txt).
+# Server (aiortc) ikut memakai TURN lewat daftar ICE bawaannya.
 def use_ice_servers_on_server(servers):
     rtc_servers = [
         RTCIceServer(urls=s["urls"], username=s.get("username"), credential=s.get("credential"))
@@ -176,22 +112,7 @@ def use_ice_servers_on_server(servers):
     RTCIceGatherer.getDefaultIceServers = classmethod(lambda cls: list(rtc_servers))
 
 # ── Sesi login ────────────────────────────────────────────────────────────────
-# PENTING: dulu ini disimpan lewat file cookies.pkl di server — itu BUKAN
-# cookie per-browser, itu satu file GLOBAL yang dipakai bersama oleh SEMUA
-# pengunjung. Siapa pun yang login akan menimpa file itu, dan pengunjung lain
-# yang membuka app yang sama otomatis "ikut login" sebagai orang terakhir yang
-# menimpanya — bug keamanan serius di deployment multi-pengguna (Streamlit
-# Cloud). st.session_state benar-benar terpisah per koneksi browser/tab, jadi
-# login satu orang tidak lagi bisa bocor ke orang lain.
-#
-# Supaya tetap login walau tab di-refresh (session_state doang hilang begitu
-# WebSocket-nya putus), kita SIMPAN JUGA sebuah token ke localStorage browser
-# yang bersangkutan lewat JS. Ini beda dari bug cookies.pkl di atas: localStorage
-# sudah per-browser/per-origin dari sananya (tidak pernah dibagi antar
-# pengunjung), dan isinya token acak yang divalidasi ke DB (lihat
-# get_username_by_token di blok "Pulihkan login" di bawah) — bukan username
-# mentah, jadi tidak bisa dipalsukan cuma dengan mengetik nama orang lain di
-# DevTools.
+# Login disimpan di session_state, plus token di localStorage agar bertahan saat refresh.
 def set_cookie(username):
     st.session_state["auth_user"] = username
     if username == GUEST_COOKIE_VALUE:
@@ -201,22 +122,14 @@ def set_cookie(username):
     else:
         stored_value = None
 
-    # Penulisan ke localStorage DITUNDA ke render berikutnya, bukan
-    # components.html() langsung di sini — set_cookie() selalu dipanggil tepat
-    # sebelum st.experimental_rerun(), dan rerun itu bisa memotong pengiriman
-    # elemen yang baru saja di-queue sebelum sempat "nyantol" ke browser (kasus
-    # yang sama persis dengan toast "Sesi tersimpan" yang sempat hilang).
-    # Tanpa ini, token akun asli bisa gagal menimpa nilai lama (mis. "__guest__"
-    # dari percobaan Mode Tamu sebelumnya) di localStorage.
+    # Penulisan ke localStorage ditunda ke render berikutnya.
     st.session_state["pending_auth_storage_write"] = stored_value if stored_value else "__clear__"
 
 def get_cookie():
     return st.session_state.get("auth_user") or None
 
 def flush_pending_auth_storage_write():
-    """Jalankan penulisan localStorage yang ditunda oleh set_cookie() di
-    render sebelumnya. Harus dipanggil di awal tiap render, sebelum ada
-    st.stop() yang bisa menghalangi ini kejalan."""
+    """Jalankan penulisan localStorage yang ditunda oleh set_cookie()."""
     if "pending_auth_storage_write" in st.session_state:
         pending = st.session_state.pop("pending_auth_storage_write")
         if pending == "__clear__":
@@ -247,16 +160,14 @@ def save_guest_session(session_id, start_time_str, events):
         "total_head_tilt": total_head_tilt,
         "events": events,
     }
-    # Tandai supaya halaman Histori tahu isi localStorage sudah berubah dan
-    # harus mengambil ulang, bukan memakai data yang terlanjur nyangkut di URL.
+    # Tandai agar halaman Histori membaca ulang data tamu.
     st.session_state["guest_history_dirty"] = True
 
     payload = json.dumps(session_data).replace("</", "<\\/")
     components.html(f"""
     <script>
     try {{
-        // Sesi yang sama disimpan berulang selama berjalan, jadi ganti entri
-        // lamanya (berdasarkan id), jangan menambah entri baru tiap kali.
+        // Ganti entri sesi dengan id yang sama, bukan menambah entri baru.
         const sesi = {payload};
         let arr = JSON.parse(localStorage.getItem('{GUEST_STORAGE_KEY}') || '[]');
         arr = arr.filter(x => x.id !== sesi.id);
@@ -268,18 +179,11 @@ def save_guest_session(session_id, start_time_str, events):
     """, height=0)
 
 # ── Penyimpanan sesi bertahap ─────────────────────────────────────────────────
-# Dulu semua kejadian baru dikirim ke database saat sesi ditutup (STOP + jeda
-# CAMERA_OFF_GRACE). Kalau HP mendadak mati, aplikasinya ditutup, atau
-# browsernya dihentikan sistem saat pindah ke homescreen, script ini tidak
-# pernah sempat jalan lagi — seluruh isi sesi hilang dan sesinya tercatat
-# tanpa waktu selesai. Sekarang kejadian disimpan begitu muncul (paling lambat
-# satu rerun = 2 detik kemudian), dan ringkasan sesinya diperbarui tiap
-# CHECKPOINT_INTERVAL detik walau tidak ada kejadian baru.
+# Kejadian disimpan bertahap; ringkasan sesi diperbarui tiap CHECKPOINT_INTERVAL detik.
 CHECKPOINT_INTERVAL = 15
 
 def save_progress(handler, session_id, is_guest, guest_start, force=False):
-    """Simpan kejadian yang belum tersimpan + perbarui ringkasan sesi.
-    Mengembalikan False kalau gagal (dicoba lagi di rerun berikutnya)."""
+    """Simpan kejadian yang belum tersimpan dan perbarui ringkasan sesi; False kalau gagal."""
     with handler.session_lock:
         if session_id is None or session_id in handler.closed_sessions:
             return True
@@ -290,8 +194,7 @@ def save_progress(handler, session_id, is_guest, guest_start, force=False):
             return True
         try:
             if is_guest:
-                # localStorage tidak punya "tambah baris", jadi sesinya ditulis
-                # ulang utuh (entri lama dengan id yang sama diganti).
+                # Sesi tamu ditulis ulang utuh di localStorage.
                 save_guest_session(session_id, guest_start, events)
             else:
                 save_session_progress(session_id, new_events)
@@ -303,12 +206,7 @@ def save_progress(handler, session_id, is_guest, guest_start, force=False):
         return True
 
 def close_session(handler, session_id, is_guest, guest_start):
-    """Tutup sesi — SEKALI saja per sesi.
-
-    Mengembalikan jumlah kejadian sesi itu, None kalau sesi ini sudah pernah
-    ditutup (panggilan ganda dilewati), atau False kalau simpanan terakhirnya
-    gagal (sesi dibiarkan terbuka supaya dicoba lagi di rerun berikutnya).
-    """
+    """Tutup sesi sekali saja; kembalikan jumlah kejadian, None jika sudah ditutup, False jika gagal."""
     with handler.session_lock:
         if session_id is None or session_id in handler.closed_sessions:
             return None
@@ -355,8 +253,7 @@ def send_otp_email(to_email: str, otp_code: str, username: str):
         return False
 
 # ── CSS ────────────────────────────────────────────────────────────────────────
-# Satu arah desain: panel instrumen malam hari — netral gelap + satu warna
-# aksen (amber, kayak lampu peringatan di dashboard mobil), bukan warna-warni.
+# Tema gelap dengan satu warna aksen amber.
 BG_COLOR = "#123A63"
 
 MOBILE_CSS = """
@@ -383,10 +280,7 @@ h1, h2, h3 { font-family: 'Space Grotesk', sans-serif; }
 [data-testid="stHeader"] { background: transparent; }
 [data-testid="stDecoration"] { display: none; }
 
-/* Background: warna dasar + dot-grid halus dan sorotan lembut di tengah atas.
-   Statis (tidak animasi) dan kontras titiknya sangat rendah supaya tidak
-   bikin mata lelah, tapi cukup untuk memberi kesan panel instrumen dan
-   menarik pandangan ke area kamera di tengah. */
+/* Background: warna dasar + dot-grid halus dan sorotan di tengah atas. */
 [data-testid="stAppViewContainer"] {
     background-color: var(--bg);
     background-image:
@@ -402,8 +296,7 @@ h1, h2, h3 { font-family: 'Space Grotesk', sans-serif; }
 }
 [data-testid="stSidebar"] { background: var(--surface); border-right: 1px solid var(--border); }
 
-/* Identitas sidebar dijadikan satu blok, supaya jaraknya tidak melebar
-   karena gap antar-elemen bawaan Streamlit. */
+/* Identitas sidebar dalam satu blok. */
 .side-user {
     font-weight: 600;
     font-size: 0.95rem;
@@ -536,8 +429,7 @@ input[type="text"], input[type="password"], input[type="number"],
 [data-testid="stTextInput"] input:focus { border-color: var(--accent) !important; }
 [data-testid="stTextInput"] input::placeholder { color: var(--muted) !important; }
 
-/* Validasi field inline ala Instagram — marker sebelum field menandai kotak
-   yang bermasalah dengan border merah, teksnya muncul tepat di bawah field. */
+/* Validasi field inline: border merah dan teks error di bawah field. */
 .element-container:has(.field-error-marker) + .element-container [data-testid="stTextInput"] input {
     border-color: #ff5c5c !important;
 }
@@ -615,8 +507,7 @@ video {
 # ─── App ─────────────────────────────────────────────────────────────────────
 query_params = st.experimental_get_query_params()
 
-# Sesi baru (abis refresh / tab baru) belum tahu siapa usernya sampai token di
-# localStorage browser ini sempat dibaca — lihat blok "Pulihkan login" di bawah.
+# Sesi baru perlu memulihkan login dari token di localStorage.
 needs_auth_restore = "auth_user" not in st.session_state and not st.session_state.get("auth_restore_done")
 
 # ── Page config ───────────────────────────────────────────────────────────────
@@ -630,12 +521,7 @@ st.markdown(MOBILE_CSS, unsafe_allow_html=True)
 flush_pending_auth_storage_write()
 
 # ── Pulihkan login dari token di localStorage browser ────────────────────────
-# Streamlit tidak menyimpan session_state lewat refresh browser (WebSocket
-# lama putus, sesi baru dibuat) — makanya dulu selalu balik ke halaman login.
-# Di sini kita cek localStorage LEWAT JS (bukan file di server!), kirim
-# hasilnya balik lewat query param URL, lalu divalidasi ke DB. Coba SEKALI
-# saja per sesi (auth_restore_done) supaya tidak looping kalau localStorage
-# kosong/invalid.
+# Token dibaca lewat JS, dikirim lewat query param, lalu divalidasi ke database (sekali per sesi).
 if needs_auth_restore:
     if "authtok" in query_params:
         token = query_params["authtok"][0]
@@ -653,8 +539,7 @@ if needs_auth_restore:
                 try {{ localStorage.removeItem('{AUTH_STORAGE_KEY}'); }} catch(e) {{}}
                 </script>
                 """, height=0)
-        # Bersihkan token dari address bar — kalau nyangkut kelihatan di URL,
-        # bisa ke-screenshot/ke-share orang lain dan dipakai login tanpa password.
+        # Hapus token dari address bar.
         components.html("""
         <script>
         window.parent.history.replaceState(null, "", window.parent.location.pathname);
@@ -672,8 +557,7 @@ if needs_auth_restore:
         }}
         </script>
         """, height=0)
-        # Key diberi suffix unik per percobaan — limit st_autorefresh terikat
-        # ke key seumur sesi, jadi tanpa ini pemulihan cuma jalan sekali.
+        # Key autorefresh unik per percobaan pemulihan.
         st.session_state["auth_restore_attempt"] = st.session_state.get("auth_restore_attempt", 0) + 1
         st_autorefresh(interval=200, limit=2, key=f"auth_restore_{st.session_state['auth_restore_attempt']}")
         st.caption("Memuat sesi...")
@@ -689,28 +573,20 @@ if logged_in:
     display_name = user or "Tamu"
     alarm_file_path = os.path.join("audio", "wake_up.wav")
 
-    # Tentukan lebih dulu apakah ada email tujuan alarm — dipakai untuk
-    # video_handler.email_recipients di bawah, DAN untuk memutuskan perlu
-    # tidaknya minta izin lokasi (lokasi cuma dipakai di body email alarm,
-    # jadi tamu / akun tanpa email terdaftar tidak perlu ditanya lokasi).
+    # Email tujuan alarm (tamu tidak punya).
     if is_guest:
         recipient_emails = []
     else:
-        # Cache per user, bukan query DB tiap rerun — halaman ini di-autorefresh
-        # tiap 1 detik selama monitoring aktif.
+        # Email tujuan di-cache per user.
         if st.session_state.get("email_recipient_for") != user:
             try:
                 recipient_email = get_user_email(user)
             except Exception as e:
-                # Email tujuan alarm itu fitur tambahan — kalau database lagi
-                # bermasalah, jangan sampai seluruh halaman ikut mati. Cukup
-                # jalan tanpa notifikasi email, dan dicoba lagi di rerun berikutnya.
+                # Gagal ambil email: lanjut tanpa notifikasi email.
                 print(f"Gagal ambil email penerima: {e}")
                 recipient_email = None
             else:
-                # Penanda BARU disetel setelah query benar-benar berhasil.
-                # Kalau disetel lebih dulu lalu query gagal, rerun berikutnya
-                # akan melewati blok ini dan membaca cache yang tak pernah terisi.
+                # Tandai cache hanya setelah query berhasil.
                 st.session_state["email_recipient_for"] = user
             st.session_state["email_recipient_cached"] = [recipient_email] if recipient_email else []
         recipient_emails = st.session_state.get("email_recipient_cached", [])
@@ -739,9 +615,7 @@ if logged_in:
         if st.button("Keluar"):
             # Auto-save sesi aktif sebelum logout
             if st.session_state.get("is_monitoring") and st.session_state.get("session_id"):
-                # Dibaca dari session_state, bukan variabel `video_handler` —
-                # variabel itu baru dibuat jauh di bawah sini, jadi dulu baris
-                # ini selalu NameError dan sesi aktif tidak pernah tersimpan.
+                # Handler diambil dari session_state.
                 handler = st.session_state.get("video_handler")
                 if handler:
                     close_session(handler, st.session_state["session_id"], is_guest,
@@ -795,27 +669,19 @@ if logged_in:
 
     video_handler = st.session_state["video_handler"]
     video_handler.email_recipients = recipient_emails
-    # Handler audio disimpan di session_state, BUKAN dibuat ulang tiap rerun.
-    # Dulu dibuat baru di tiap rerun — dan selama kamera aktif halaman di-rerun
-    # tiap 2 detik — sehingga posisi klip alarm ter-reset: bunyinya terpotong
-    # lalu mulai lagi dari awal tiap 2 detik. Itulah suara yang patah-patah.
-    # Penanda alarm-nya (`playing`) ikut disimpan di objek yang sama; dulu
-    # disimpan di dict yang juga dibuat ulang kosong tiap rerun.
+    # Handler audio disimpan di session_state agar alarm tidak terpotong setiap rerun.
     if "audio_handler" not in st.session_state:
         st.session_state["audio_handler"] = AudioFrameHandler(sound_file_path=alarm_file_path)
         st.session_state["audio_handler"].playing = False
     audio_handler = st.session_state["audio_handler"]
 
-    # Pengukuran waktu proses per frame (mode DIAGNOSTIK saja, lihat
-    # diagnostik.py). Disimpan di session_state supaya bertahan lintas rerun.
+    # Pengukuran waktu proses per frame (mode DIAGNOSTIK).
     if "frame_timer" not in st.session_state:
         st.session_state["frame_timer"] = FrameTimer()
     frame_timer = st.session_state["frame_timer"]
 
     def video_frame_callback(frame: av.VideoFrame):
-        # Diukur dari frame diterima sampai frame hasil siap dikirim balik:
-        # konversi ke array, CLAHE, FaceMesh, EAR/MAR/kemiringan, logika alarm
-        # & email, gambar overlay, konversi balik ke VideoFrame.
+        # Waktu proses satu frame: dari frame diterima sampai frame hasil siap dikirim.
         t0 = time.perf_counter() if DIAGNOSTIK_AKTIF else None
         try:
             img = frame.to_ndarray(format="bgr24")
@@ -826,37 +692,18 @@ if logged_in:
                 frame_timer.record((time.perf_counter() - t0) * 1000)
             return out
         except Exception:
-            # Callback ini jalan di thread kamera. Kalau error-nya dibiarkan
-            # lolos, aiortc menelannya diam-diam: frame berhenti dikirim,
-            # video jadi kosong, tanpa pesan apa pun. Dicetak ke log supaya
-            # bisa dilacak, ditandai supaya main thread bisa memberi tahu user,
-            # dan frame aslinya tetap dikembalikan supaya koneksinya tidak
-            # ikut mati.
-            #
-            # Traceback-nya cukup dicetak SEKALI. Callback ini dipanggil tiap
-            # frame (15x per detik), jadi error yang berulang di tiap frame
-            # akan membanjiri terminal dengan traceback yang isinya sama.
+            # Catat error sekali ke log dan kembalikan frame asli agar koneksi tidak putus.
             if not getattr(video_handler, "last_error", False):
                 print("Error di video_frame_callback:\n" + traceback.format_exc())
             video_handler.last_error = True
             return frame
 
-    # Key sengaja TETAP, bukan dinamis. Sempat dibuat berubah tiap sesi selesai
-    # untuk mengakali START yang kadang macet, tapi itu menyisakan instance
-    # komponen lama tiap siklus STOP→START — dugaan kuat penyebab kamera makin
-    # sering gagal nyambung setelah dipakai beberapa kali.
-    # Server memakai daftar lengkap (termasuk TURN UDP — jalur paling ringan
-    # untuk media, dan pengumpulan kandidat di server tidak menahan browser);
-    # browser memakai daftar yang sudah dipangkas, lihat trim_turn_urls().
+    # Daftar ICE lengkap untuk server, versi dipangkas untuk browser; key komponen sengaja tetap.
     raw_ice_servers = build_ice_servers()
     use_ice_servers_on_server(raw_ice_servers)
     ice_servers = trim_turn_urls(raw_ice_servers)
     def audio_frame_callback(frame: av.AudioFrame):
-        # Alarm dibunyikan dengan MENGGANTI isi frame mic yang masuk. Sempat
-        # dicoba track audio sendiri lewat `source_audio_track`, lalu dibatalkan:
-        # dengan cara itu track mic tidak dibaca siapa pun, padahal aiortc terus
-        # menumpuk frame mic hasil decode di antrean tanpa batas — 50 frame per
-        # detik, bisa lebih dari 1 GB dalam perjalanan 2 jam.
+        # Alarm dibunyikan dengan mengganti isi frame mikrofon.
         return audio_handler.process(frame, play_sound=audio_handler.playing)
 
     ctx = webrtc_streamer(
@@ -864,25 +711,7 @@ if logged_in:
         video_frame_callback=video_frame_callback,
         audio_frame_callback=audio_frame_callback,
         rtc_configuration={"iceServers": ice_servers},
-        # 360p @ 15fps, bukan 480p pada fps bawaan (biasanya 30). Kejadian
-        # kantuk diukur dalam hitungan detik, jadi 15fps lebih dari cukup —
-        # sementara memangkas fps langsung memotong jumlah frame yang harus
-        # diproses CPU 1-core Streamlit Cloud, dan resolusi yang lebih kecil
-        # mempercepat konversi warna + CLAHE. Bonusnya: bandwidth TURN yang
-        # terpakai ikut turun banyak, jadi kuota Metered lebih awet.
-        #
-        # facingMode "user" = kamera DEPAN. Tanpa ini, browser HP memilih
-        # kamera bawaannya sendiri — di Android itu biasanya kamera BELAKANG,
-        # yang untuk deteksi kantuk pengemudi jelas tidak ada gunanya: yang
-        # terekam jalanan, bukan wajah.
-        #
-        # Sengaja "ideal", BUKAN {"exact": "user"}. `exact` menjadikannya
-        # syarat mutlak, dan webcam laptop/USB di Windows umumnya tidak
-        # melaporkan facingMode sama sekali — permintaannya akan ditolak
-        # (OverconstrainedError) dan kameranya gagal nyala total. Jadi `exact`
-        # justru berisiko mematikan kamera persis di mesin yang dipakai buat
-        # development dan sidang. Dengan "ideal": di HP tetap terkunci ke
-        # kamera depan, di laptop jatuh ke satu-satunya webcam yang ada.
+        # Kamera depan, 360p, 15 fps.
         media_stream_constraints={
             "video": {
                 "facingMode": {"ideal": "user"},
@@ -897,34 +726,19 @@ if logged_in:
         ),
     )
 
-    # ── GPS untuk email darurat — cuma diminta kalau memang ada tujuan emailnya
-    # Lewat komponen sendiri (components/geolocation), BUKAN dengan mengganti
-    # URL halaman seperti dulu. Streamlit 1.17 menyusun alamat iframe komponen
-    # kamera dengan menyertakan URL halaman saat ini (`streamlitUrl`), jadi tiap
-    # kali URL berubah, iframe kamera dimuat ulang dan koneksi WebRTC-nya putus.
-    # Itulah sebabnya dulu akun login (yang punya email tujuan) selalu gagal
-    # START, sementara mode tamu (tanpa pelacak lokasi) jalan normal.
-    #
-    # Sengaja dirender SETELAH webrtc_streamer: elemen Streamlit dikenali dari
-    # urutannya, dan komponen yang muncul/hilang di ATAS kamera akan menggeser
-    # posisi kamera sehingga iframe-nya dibuat ulang.
+    # GPS untuk email darurat lewat komponen geolocation, dirender setelah kamera.
     if recipient_emails:
         maps_link = geolocation_component(key="geolocation", default=None)
         if maps_link:
             video_handler.location_link = maps_link
 
     # ── Auto-start saat kamera ON, auto-save saat kamera OFF ─────────────────
-    # `playing` bisa False sesaat walau kamera sebenarnya masih jalan (WebRTC
-    # lagi negosiasi / reconnect). Selama masih `signalling`, kamera dianggap
-    # hidup — ini kriteria yang sama dipakai streamlit_webrtc sendiri sebelum
-    # membunuh worker-nya. Tanpa ini sesi bisa tertutup sendiri di tengah jalan.
+    # Kamera dianggap hidup selama playing atau signalling.
     cam_playing    = bool(ctx.state.playing) if ctx and ctx.state else False
     cam_signalling = bool(ctx.state.signalling) if ctx and ctx.state else False
     camera_active  = cam_playing or cam_signalling
 
-    # Diukur pakai jam, bukan jumlah rerun: rerun bisa terjadi beruntun dalam
-    # hitungan milidetik (autorefresh + perubahan nilai komponen barengan),
-    # jadi "sekian kali pengecekan" gampang habis di dalam satu gangguan sesaat.
+    # Lama kamera mati diukur dengan waktu, bukan jumlah rerun.
     now = time.time()
     if camera_active:
         st.session_state["camera_off_since"] = None
@@ -951,24 +765,17 @@ if logged_in:
         video_handler._tilt_event_start = None
         frame_timer.reset()  # statistik diagnostik per sesi kamera
 
-    # Sesi baru ditutup kalau kamera benar-benar mati selama CAMERA_OFF_GRACE
-    # detik berturut-turut, supaya gangguan sesaat tidak salah dibaca sebagai
-    # user menekan STOP.
+    # Sesi ditutup setelah kamera mati selama CAMERA_OFF_GRACE detik.
     elif st.session_state["is_monitoring"] and camera_off_for >= CAMERA_OFF_GRACE:
         total = close_session(video_handler, st.session_state["session_id"], is_guest,
                               st.session_state.get("guest_session_start"))
-        # False = simpanan terakhir gagal: sesi dibiarkan terbuka dan
-        # penutupan dicoba lagi di rerun berikutnya. None = sesi ini ternyata
-        # sudah ditutup oleh panggilan sebelumnya — cukup rapikan statusnya.
+        # False = simpanan gagal (coba lagi), None = sesi sudah ditutup sebelumnya.
         if total is not False:
             st.session_state["is_monitoring"] = False
             st.session_state["session_id"]    = None
             st.session_state["camera_off_since"] = None
             if total is not None:
-                # JANGAN panggil st.experimental_rerun() di sini. Untuk mode
-                # tamu, save_guest_session() menulis ke localStorage lewat
-                # components.html, dan rerun akan memotong render sebelum
-                # elemen itu sampai ke browser — sesinya jadi tidak tersimpan.
+                # Jangan rerun di sini agar penyimpanan sesi tamu sempat sampai ke browser.
                 st.success(f"Sesi tersimpan! {total} kejadian kantuk tercatat.")
 
     # Simpan bertahap selama sesi berjalan — lihat save_progress().
@@ -977,16 +784,7 @@ if logged_in:
                       st.session_state.get("guest_session_start"))
 
     # ── Info status ───────────────────────────────────────────────────────────
-    # Rerun berkala selama kamera/sesi hidup: event kantuk masuk dari thread
-    # kamera di background, dan transisi kamera nyala/mati tidak selalu memicu
-    # rerun sendiri — tanpa ini status kamera baru kebaca saat ada interaksi
-    # manual (itu sebabnya START seolah perlu dipencet dua kali).
-    # 2 detik, bukan 1 detik. Tiap rerun menjalankan ulang SELURUH script di
-    # core yang sama dengan thread pemroses frame, jadi di Streamlit Cloud itu
-    # langsung merebut CPU dari video. Masih jauh di bawah CAMERA_OFF_GRACE (3
-    # detik) sehingga deteksi kamera mati tetap jalan; konsekuensinya cuma
-    # mulai/berhentinya sesi ketahuan paling lambat 2 detik. Turunkan lagi ke
-    # 1000 kalau jeda itu terasa mengganggu.
+    # Rerun tiap 2 detik selama kamera atau sesi aktif.
     if st.session_state["is_monitoring"] or camera_active:
         st_autorefresh(interval=2000, key="live_session_counter")
 
@@ -1002,7 +800,6 @@ if logged_in:
         st.warning("Ada gangguan saat memproses frame kamera. Detailnya tercatat di log aplikasi.")
 
     # ── Diagnostik (hanya kalau DIAGNOSTIK=1) ─────────────────────────────────
-    # Dirender SETELAH komponen kamera supaya tidak menggeser posisinya.
     if DIAGNOSTIK_AKTIF:
         with st.expander("Diagnostik", expanded=False):
             s = frame_timer.summary()
@@ -1021,8 +818,7 @@ if logged_in:
 
             st.markdown("**Handshake & query database** (diukur dari server ini)")
             if st.button("Ukur database (10x)", key="diag_ukur_db"):
-                # Diimpor di sini saja: modul ini tidak dimuat sama sekali
-                # kalau tombolnya tidak pernah ditekan.
+                # Diimpor hanya saat tombol ditekan.
                 import ukur_db
                 with st.spinner("Mengukur 10 percobaan..."):
                     try:
@@ -1061,10 +857,7 @@ else:
             if logging_in:
                 st.button("Memproses...", disabled=True, key="login_btn_busy")
             elif st.button("Masuk", key="login_btn"):
-                # Sama seperti tombol Verifikasi: query DB-nya ditunda ke render
-                # berikutnya supaya tombolnya sempat terkunci lebih dulu. Tanpa
-                # ini, tiap klik beruntun selagi query berjalan memicu rerun
-                # baru dan query login dijalankan berkali-kali.
+                # Query login dijalankan di render berikutnya agar tombol terkunci dulu.
                 if not username or not password:
                     st.error("Tolong lengkapi semua field.")
                 else:
@@ -1082,8 +875,7 @@ else:
                     else:
                         st.session_state['login_error'] = "Password salah. Silakan coba lagi."
                 except Exception as e:
-                    # Wajib ditangkap: kalau error-nya lolos, flag logging_in
-                    # tidak pernah direset dan tombolnya terkunci selamanya.
+                    # Error ditangkap agar tombol tidak terkunci selamanya.
                     print(f"Login gagal: {e}")
                     st.session_state['login_error'] = "Gagal menghubungi server. Periksa koneksi internet kamu lalu coba lagi."
                 st.session_state['logging_in'] = False
@@ -1115,11 +907,7 @@ else:
                 username = st.text_input("Username", placeholder="Buat username kamu")
                 password = st.text_input("Password", type="password", placeholder="Buat password kamu")
 
-                # `key` di sini bikin Streamlit rerun otomatis begitu field ini
-                # kehilangan fokus (blur), dan session_state[key] sudah berisi
-                # nilai terbaru SEBELUM baris ini jalan — jadi validasinya bisa
-                # langsung dibaca duluan, sebelum field-nya sendiri dirender,
-                # tanpa perlu tombol submit atau rerun manual.
+                # Validasi email dibaca dari session_state sebelum field dirender.
                 email_now = st.session_state.get('reg_email_input', '').strip()
                 email_invalid = bool(email_now) and not is_valid_email(email_now)
 
@@ -1141,10 +929,7 @@ else:
                 if registering:
                     st.button("Memproses...", disabled=True, key="send_otp_btn_sending")
                 elif st.button("Daftar", key="send_otp_btn"):
-                    # SEMUA jalur daftar lewat penundaan ini, termasuk yang tanpa
-                    # email. Dulu jalur tanpa email langsung memanggil add_user()
-                    # di render klik itu juga — klik beruntun memanggilnya dua
-                    # kali, dan yang kedua menabrak UNIQUE username di database.
+                    # Semua jalur daftar diproses di render berikutnya agar tombol terkunci dulu.
                     if not username or not password:
                         st.error("Tolong lengkapi username dan password.")
                     elif email_invalid:
@@ -1179,8 +964,7 @@ else:
                             else:
                                 st.session_state['register_error'] = "Gagal mengirim email. Periksa kembali alamat email dan coba lagi."
                     except Exception as e:
-                        # Wajib ditangkap: kalau error-nya lolos, flag sending_otp
-                        # tidak pernah direset dan tombolnya terkunci selamanya.
+                        # Error ditangkap agar tombol tidak terkunci selamanya.
                         print(f"Pendaftaran gagal: {e}")
                         st.session_state['register_error'] = "Gagal menghubungi server. Periksa koneksi internet kamu lalu coba lagi."
                     st.session_state['sending_otp'] = False
@@ -1209,10 +993,7 @@ else:
                 if verifying:
                     st.button("Memverifikasi...", disabled=True, key="verify_otp_btn_busy")
                 elif st.button("Verifikasi & Buat Akun", key="verify_otp_btn"):
-                    # Kerja beratnya ditunda ke render berikutnya supaya tombol
-                    # sempat berubah jadi "Memverifikasi..." dan terkunci —
-                    # tanpa ini user tidak dapat umpan balik apa pun dan
-                    # cenderung nge-spam tombolnya.
+                    # Verifikasi dijalankan di render berikutnya agar tombol terkunci dulu.
                     if not otp_input.strip():
                         st.session_state['otp_error'] = "Masukkan kode OTP terlebih dahulu."
                     else:
@@ -1241,12 +1022,7 @@ else:
 
                 # Tombol kirim ulang, kanan bawah, kena cooldown 30 detik
                 remaining = int(30 - (time.time() - st.session_state.get('otp_last_sent', 0)))
-                # Dulu di-refresh tiap 1 detik dan itu merusak layar ini di HP:
-                # tiap rerun menelan tap tombol Verifikasi dan mengganggu
-                # pengetikan kode (di HP nilai field baru sampai ke server
-                # setelah field kehilangan fokus, jadi syarat `not otp_input`
-                # tidak menolong). Angkanya cuma kosmetik, jadi jedanya
-                # diperlonggar dan dimatikan total selama verifikasi berjalan.
+                # Hitung mundur kirim ulang di-refresh tiap 3 detik, berhenti saat mengetik atau verifikasi.
                 if remaining > 0 and not otp_input and not verifying:
                     st_autorefresh(interval=3000, limit=12, key=f"resend_countdown_{st.session_state['otp_last_sent']}")
                 resending = st.session_state.get('resending_otp', False)
@@ -1258,8 +1034,7 @@ else:
                 else:
                     st.markdown('<div class="btn-link-marker-right"></div>', unsafe_allow_html=True)
                     if st.button("Kirim ulang", key="resend_otp_btn"):
-                        # Dikunci dulu baru dikirim, sama seperti tombol Daftar —
-                        # tanpa ini klik beruntun mengirim beberapa email OTP.
+                        # Tombol dikunci dulu sebelum OTP dikirim ulang.
                         st.session_state['resending_otp'] = True
                         st.experimental_rerun()
 

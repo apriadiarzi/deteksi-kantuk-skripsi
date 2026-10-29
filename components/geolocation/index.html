@@ -2,23 +2,13 @@
 <html>
 <body style="margin:0">
 <script>
-// Komponen Streamlit dua arah yang paling minimal: ambil lokasi GPS browser
-// lalu kirim ke Python lewat setComponentValue. Ditulis langsung dengan
-// protokol pesan komponen Streamlit, jadi tidak butuh npm / build step.
-//
-// Dulu lokasi dikirim dengan mengganti URL halaman (?loc=...). Itu yang bikin
-// kamera gagal START untuk akun login: Streamlit 1.17 menyusun alamat iframe
-// komponen kamera dengan menyertakan URL halaman saat ini, jadi tiap URL
-// berubah, iframe kamera dimuat ulang dan koneksi WebRTC-nya ikut putus.
+// Komponen Streamlit: kirim lokasi GPS browser ke Python lewat setComponentValue.
 
 function send(type, data) {
   window.parent.postMessage(Object.assign({ isStreamlitMessage: true, type: type }, data), "*");
 }
 
-// Tiap kiriman memicu satu rerun halaman, jadi dibatasi: kirim posisi
-// pertama secepatnya, setelah itu paling sering 30 detik sekali dan hanya
-// kalau sudah berpindah >= 100 m. Untuk email darurat, lokasi yang
-// tertinggal paling lama 30 detik masih cukup.
+// Kirim ulang paling cepat 30 detik sekali dan hanya jika berpindah >= 100 m.
 const MIN_INTERVAL_MS = 30000;
 const MIN_DISTANCE_M = 100;
 let last = null;
@@ -46,8 +36,7 @@ function onPosition(pos) {
 
 let started = false;
 window.addEventListener("message", function (event) {
-  // Mulai melacak setelah render pertama dari Streamlit — nilai yang dikirim
-  // sebelum komponen dianggap siap bisa diabaikan.
+  // Mulai melacak setelah render pertama dari Streamlit.
   if (started || !event.data || event.data.type !== "streamlit:render") return;
   started = true;
   send("streamlit:setFrameHeight", { height: 0 });
